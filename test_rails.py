@@ -126,5 +126,9 @@ async def run() -> int:
     return 1 if failures else 0
 
 
+def test_guardrails_cases() -> None:
+    assert asyncio.run(run()) == 0
+
+
 if __name__ == "__main__":
     sys.exit(asyncio.run(run()))

@@ -1,0 +1,21 @@
+import core
+import guardrails
+
+# Output rails: PII / secret redaction before a response reaches the user.
+# Colang strings interpolate {..}, so regex quantifiers are written {{n}}.
+# Word boundaries use (?<!\w) / (?!\w) because "\b" would be read as a
+# backspace escape inside a string literal.
+
+flow output rails $output_text
+  mask_pii_output $output_text
+
+flow mask_pii_output $output_text
+  global $bot_message
+
+  $has_cc = search("(?<!\d)\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}(?!\d)", $output_text)
+  $has_email = search("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}", $output_text)
+  $has_key = search("(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{{20,}}", $output_text)
+
+  if $has_cc or $has_email or $has_key
+    # `_bot_say` delivers $bot_message, so overwriting it redacts the reply.
+    $bot_message = await MaskSensitiveEntitiesAction(text=$output_text)

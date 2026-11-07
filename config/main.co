@@ -1,0 +1,13 @@
+import core
+import guardrails
+
+flow main
+  activate handle user query
+
+# Every user turn passes through `input rails` (via the guardrails library's
+# `_user_said` override) before this flow continues, and every `bot say`
+# passes through `output rails` before reaching the user.
+flow handle user query
+  user said something as $ref
+  $answer = await GenerateAnswerAction(user_message=$ref.transcript)
+  bot say $answer

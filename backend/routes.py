@@ -1,0 +1,135 @@
+"""API routes for the NeMo-Shield guardrails gateway."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+from fastapi import APIRouter
+from nemoguardrails import LLMRails, RailsConfig
+from nemoguardrails.types import ChatMessage, Role
+
+from backend.models import (
+    ABTestRequest,
+    ABTestResponse,
+    ChatRequest,
+    ChatResponse,
+    SafetyVerdict,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = ROOT / "config"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from mock_llm import MockLLM  # noqa: E402
+
+BLOCK_MESSAGE = (
+    "Request blocked by NeMo-Shield Input Rail: "
+    "Malicious prompt injection pattern detected (OWASP LLM01)."
+)
+REDACTION_TOKENS = ("[REDACTED_EMAIL]", "[REDACTED_CC]", "[REDACTED_KEY]")
+PII_CATEGORY = "PII_LEAKAGE"
+UNGUARDED_SYSTEM_PROMPT = "You are a helpful assistant."
+
+
+def _load_actions_module():
+    """Load config/actions.py by path (avoids clashing with any `config` package)."""
+    spec = importlib.util.spec_from_file_location("nemo_shield_actions", CONFIG_DIR / "actions.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_actions = _load_actions_module()
+classify_threat = _actions.classify_threat
+OWASP_LLM01 = _actions.OWASP_LLM01
+
+router = APIRouter(prefix="/api/v1")
+
+_rails: Optional[LLMRails] = None
+_base_llm = MockLLM()
+
+
+def use_mock_llm() -> bool:
+    return os.getenv("NEMO_SHIELD_FORCE_MOCK") == "1" or not os.getenv("OPENAI_API_KEY")
+
+
+def get_rails() -> LLMRails:
+    """Return the shared LLMRails instance, building it on first use."""
+    global _rails
+    if _rails is None:
+        config = RailsConfig.from_path(str(CONFIG_DIR))
+        _rails = LLMRails(config, llm=MockLLM()) if use_mock_llm() else LLMRails(config)
+    return _rails
+
+
+async def _run_guarded(prompt: str) -> Tuple[str, float]:
+    rails = get_rails()
+    start = time.perf_counter()
+    result: Any = await rails.generate_async(messages=[{"role": "user", "content": prompt}])
+    latency_ms = (time.perf_counter() - start) * 1000
+    reply = result["content"] if isinstance(result, dict) else str(result)
+    return reply, latency_ms
+
+
+async def _run_unguarded(prompt: str) -> Tuple[str, float]:
+    start = time.perf_counter()
+    response = await _base_llm.generate_async(
+        [
+            ChatMessage(role=Role.SYSTEM, content=UNGUARDED_SYSTEM_PROMPT),
+            ChatMessage.from_user(prompt),
+        ]
+    )
+    latency_ms = (time.perf_counter() - start) * 1000
+    return (response.content or "").strip(), latency_ms
+
+
+def _classify_reply(reply: str, threat: Dict[str, Any]) -> Tuple[SafetyVerdict, Optional[str], float]:
+    """Map a rails reply plus the input classifier result to a verdict."""
+    if reply.strip() == BLOCK_MESSAGE:
+        return SafetyVerdict.INPUT_BLOCKED, OWASP_LLM01, max(threat["confidence"], 0.0)
+    if any(token in reply for token in REDACTION_TOKENS):
+        return SafetyVerdict.OUTPUT_ALTERED, PII_CATEGORY, 1.0
+    category = threat["owasp_tag"] if threat["rail_action"] == "FLAGGED" else None
+    return SafetyVerdict.ALLOWED, category, threat["confidence"]
+
+
+@router.get("/health")
+async def health() -> Dict[str, Any]:
+    return {"status": "healthy", "service": "NeMo-Shield", "rails_active": True}
+
+
+@router.post("/guard/chat", response_model=ChatResponse)
+async def guard_chat(request: ChatRequest) -> ChatResponse:
+    threat = await classify_threat(request.prompt)
+    reply, latency_ms = await _run_guarded(request.prompt)
+    verdict, category, confidence = _classify_reply(reply, threat)
+    return ChatResponse(
+        reply=reply,
+        verdict=verdict,
+        threat_category=category,
+        confidence=round(confidence, 4),
+        latency_ms=round(latency_ms, 2),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.post("/guard/ab-test", response_model=ABTestResponse)
+async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
+    unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
+    guarded_reply, guarded_ms = await _run_guarded(request.prompt)
+    threat = await classify_threat(request.prompt)
+    verdict, _, _ = _classify_reply(guarded_reply, threat)
+    return ABTestResponse(
+        unguarded_reply=unguarded_reply,
+        guarded_reply=guarded_reply,
+        intervened=verdict != SafetyVerdict.ALLOWED,
+        latency_delta_ms=round(guarded_ms - unguarded_ms, 2),
+    )

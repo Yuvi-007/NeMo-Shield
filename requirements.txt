@@ -1,0 +1,7 @@
+nemoguardrails
+fastapi
+uvicorn
+pydantic
+python-dotenv
+motor
+pytest

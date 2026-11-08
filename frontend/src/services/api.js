@@ -6,6 +6,8 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+const ADMIN_HEADERS = { 'X-Admin-Key': 'dev-admin-secret-key' }
+
 export async function sendChat(prompt) {
   const { data } = await client.post('/guard/chat', { prompt })
   return data
@@ -17,14 +19,14 @@ export async function runABTest(prompt) {
 }
 
 export async function getTelemetry() {
-  const { data } = await client.get('/telemetry')
+  const { data } = await client.get('/telemetry', { headers: ADMIN_HEADERS })
   return data
 }
 
 export async function getAuditLogs(limit = 50, skip = 0, verdict = null) {
   const params = { limit, skip }
   if (verdict) params.verdict = verdict
-  const { data } = await client.get('/audit/logs', { params })
+  const { data } = await client.get('/audit/logs', { params, headers: ADMIN_HEADERS })
   return data
 }
 

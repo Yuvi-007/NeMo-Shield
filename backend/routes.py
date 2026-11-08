@@ -17,6 +17,7 @@ from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
 from backend.database import audit_store
+from backend.security import canonicalize_text, verify_admin_key
 from backend.models import (
     ABTestRequest,
     ABTestResponse,
@@ -89,8 +90,22 @@ class SlidingWindowRateLimiter:
 rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
 
 
+def behind_trusted_proxy() -> bool:
+    return os.getenv("BEHIND_TRUSTED_PROXY") == "1"
+
+
+def get_client_ip(request: Request) -> str:
+    """Use X-Forwarded-For only when a trusted proxy sets it; it is spoofable otherwise."""
+    if behind_trusted_proxy():
+        forwarded = request.headers.get("x-forwarded-for", "")
+        first_hop = forwarded.split(",")[0].strip()
+        if first_hop:
+            return first_hop
+    return request.client.host if request.client else "unknown"
+
+
 async def enforce_rate_limit(request: Request) -> None:
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     if not rate_limiter.allow(client_ip):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=RATE_LIMIT_DETAIL)
 
@@ -126,6 +141,7 @@ async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
     and PII output checks) still goes through the full rails.
     """
     start = time.perf_counter()
+    prompt = canonicalize_text(prompt)
     threat = await classify_threat(prompt)
     if threat["rail_action"] == "BLOCKED":
         reply = BLOCK_MESSAGE
@@ -198,13 +214,17 @@ async def guard_chat(
         threat_category=response.threat_category,
         confidence=response.confidence,
         latency_ms=response.latency_ms,
-        client_ip=http_request.client.host if http_request.client else None,
+        client_ip=get_client_ip(http_request),
     )
     background_tasks.add_task(_record_audit_log, entry)
     return response
 
 
-@router.get("/audit/logs", response_model=List[AuditLogEntry])
+@router.get(
+    "/audit/logs",
+    response_model=List[AuditLogEntry],
+    dependencies=[Depends(verify_admin_key)],
+)
 async def get_audit_logs(
     limit: int = Query(50, ge=1, le=500),
     skip: int = Query(0, ge=0),
@@ -216,7 +236,9 @@ async def get_audit_logs(
     return [AuditLogEntry(**record) for record in records]
 
 
-@router.get("/telemetry", response_model=TelemetrySummary)
+@router.get(
+    "/telemetry", response_model=TelemetrySummary, dependencies=[Depends(verify_admin_key)]
+)
 async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
     summary = TelemetrySummary(**await audit_store.telemetry_summary())
     background_tasks.add_task(_record_telemetry_snapshot, summary)

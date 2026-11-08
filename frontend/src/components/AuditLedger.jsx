@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
-import { describeError, getAuditLogs, onAdminKeyChange } from '../services/api'
+import { ChevronRight } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { countRedactions } from '../lib/redactions'
+import { getAuditLogs, onAdminKeyChange } from '../services/api'
+import AdminErrorBanner from './AdminErrorBanner'
 import CopyButton from './CopyButton'
+import PiiInspector, { RedactionPills } from './PiiInspector'
 import VerdictChip from './VerdictChip'
 
 const FILTERS = [
@@ -53,26 +57,53 @@ export default function AuditLedger() {
   const [records, setRecords] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [expanded, setExpanded] = useState(null)
+  const [redactedOnly, setRedactedOnly] = useState(false)
 
-  const load = useCallback(async (verdict) => {
-    setLoading(true)
-    setError(null)
-    try {
-      setRecords(await getAuditLogs(PAGE_SIZE, 0, verdict === 'ALL' ? null : verdict))
-    } catch (err) {
-      setError(describeError(err))
-      setRecords([])
-    } finally {
-      setLoading(false)
-    }
+  const latestRequest = useRef(0)
+
+  // State is only set in promise callbacks, so effects can call this directly.
+  // Responses to superseded requests (fast filter clicks) are dropped.
+  const fetchLogs = useCallback((verdict) => {
+    const request = ++latestRequest.current
+    const current = () => request === latestRequest.current
+    return getAuditLogs(PAGE_SIZE, 0, verdict === 'ALL' ? null : verdict)
+      .then(
+        (rows) => {
+          if (!current()) return
+          setRecords(rows)
+          setError(null)
+        },
+        (err) => {
+          if (!current()) return
+          // Keep the error object: the banner picks its fallback from the status code.
+          setError(err)
+          setRecords([])
+        },
+      )
+      .finally(() => {
+        if (current()) setLoading(false)
+      })
   }, [])
 
+  const load = useCallback(
+    (verdict) => {
+      setLoading(true)
+      return fetchLogs(verdict)
+    },
+    [fetchLogs],
+  )
+
   useEffect(() => {
-    load(filter)
-  }, [filter, load])
+    fetchLogs(filter)
+  }, [filter, fetchLogs])
 
   // Refetch as soon as an admin key is saved in the header.
   useEffect(() => onAdminKeyChange(() => load(filter)), [filter, load])
+
+  const rows = records.map((r) => ({ record: r, redactions: countRedactions(r.prompt, r.reply) }))
+  const visible = redactedOnly ? rows.filter((row) => Object.keys(row.redactions).length) : rows
+  const redactedCount = rows.filter((row) => Object.keys(row.redactions).length).length
 
   return (
     <div className="space-y-5">
@@ -106,7 +137,11 @@ export default function AuditLedger() {
             type="button"
             role="radio"
             aria-checked={filter === f.id}
-            onClick={() => setFilter(f.id)}
+            onClick={() => {
+              if (f.id === filter) return
+              setLoading(true)
+              setFilter(f.id)
+            }}
             className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${
               filter === f.id
                 ? 'bg-fg text-canvas'
@@ -117,16 +152,21 @@ export default function AuditLedger() {
             {f.id}
           </button>
         ))}
+        <label className="ml-2 inline-flex cursor-pointer items-center gap-1.5 self-center text-xs text-fg-muted">
+          <input
+            type="checkbox"
+            checked={redactedOnly}
+            onChange={(e) => setRedactedOnly(e.target.checked)}
+            className="accent-accent"
+          />
+          PII redacted only
+        </label>
         <span className="ml-auto self-center text-xs text-fg-subtle tabular-nums">
-          {loading ? 'Loading…' : `${records.length} records`}
+          {loading ? 'Loading…' : `${visible.length} records · ${redactedCount} with redactions`}
         </span>
       </div>
 
-      {error && (
-        <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger-fg">
-          {error}
-        </p>
-      )}
+      <AdminErrorBanner error={error} onRetry={() => load(filter)} />
 
       <div className="glass overflow-x-auto rounded-lg border border-line">
         <table className="w-full min-w-[56rem] border-collapse text-left text-[13px]">
@@ -136,6 +176,7 @@ export default function AuditLedger() {
               <th scope="col" className="px-3 py-2 font-medium">Prompt</th>
               <th scope="col" className="px-3 py-2 font-medium">Reply</th>
               <th scope="col" className="px-3 py-2 font-medium">Verdict</th>
+              <th scope="col" className="px-3 py-2 font-medium">PII scrubbed</th>
               <th scope="col" className="px-3 py-2 text-right font-medium">Latency</th>
               <th scope="col" className="px-3 py-2 font-medium">
                 <span className="sr-only">Copy record</span>
@@ -143,30 +184,61 @@ export default function AuditLedger() {
             </tr>
           </thead>
           <tbody className="divide-y divide-line/80">
-            {records.map((r) => (
-              <tr key={r.id} className="align-top hover:bg-muted/50">
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-fg-muted tabular-nums" title={r.timestamp}>
-                  {formatTimestamp(r.timestamp)}
-                </td>
-                <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-2" title={r.prompt}>
-                  {snippet(r.prompt)}
-                </td>
-                <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-muted" title={r.reply}>
-                  {snippet(r.reply)}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2">
-                  <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} animate={false} />
-                </td>
-                <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-fg-3 tabular-nums">
-                  {r.latency_ms.toFixed(1)} ms
-                </td>
-                <td className="px-3 py-1.5 text-right">
-                  <CopyButton compact text={() => JSON.stringify(r, null, 2)} label="Copy record JSON" />
-                </td>
-              </tr>
+            {visible.map(({ record: r, redactions }) => (
+              <Fragment key={r.id}>
+                <tr className="align-top hover:bg-muted/50">
+                  <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-fg-muted tabular-nums" title={r.timestamp}>
+                    <button
+                      type="button"
+                      onClick={() => setExpanded((id) => (id === r.id ? null : r.id))}
+                      aria-expanded={expanded === r.id}
+                      aria-controls={`inspect-${r.id}`}
+                      aria-label={`Inspect record from ${formatTimestamp(r.timestamp)}`}
+                      className="inline-flex items-center gap-1 rounded hover:text-fg-2"
+                    >
+                      <ChevronRight
+                        className={`size-3.5 transition-transform ${expanded === r.id ? 'rotate-90' : ''}`}
+                        aria-hidden
+                      />
+                      {formatTimestamp(r.timestamp)}
+                    </button>
+                  </td>
+                  <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-2" title={r.prompt}>
+                    {snippet(r.prompt)}
+                  </td>
+                  <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-muted" title={r.reply}>
+                    {snippet(r.reply)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2">
+                    <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} animate={false} />
+                  </td>
+                  <td className="px-3 py-2">
+                    <RedactionPills counts={redactions} compact />
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-fg-3 tabular-nums">
+                    {r.latency_ms.toFixed(1)} ms
+                  </td>
+                  <td className="px-3 py-1.5 text-right">
+                    <CopyButton compact text={() => JSON.stringify(r, null, 2)} label="Copy record JSON" />
+                  </td>
+                </tr>
+                {expanded === r.id && (
+                  <tr id={`inspect-${r.id}`} className="bg-muted/30">
+                    <td colSpan={7} className="px-4 py-4">
+                      <PiiInspector record={r} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
+
+        {!loading && !error && records.length > 0 && visible.length === 0 && (
+          <p className="px-4 py-10 text-center text-sm text-fg-subtle">
+            None of these records had PII redacted. Try the PII Exfiltration attack in the Playground.
+          </p>
+        )}
 
         {!loading && !error && records.length === 0 && (
           <p className="px-4 py-10 text-center text-sm text-fg-subtle">

@@ -425,3 +425,90 @@ def test_admin_key_guessing_is_rate_limited(client):
 
     throttled = client.get("/api/v1/telemetry", headers=ADMIN_HEADERS)
     assert throttled.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# PII redaction: the Colang detector and the Python masker must agree.
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+OUTPUT_RAILS = Path(__file__).resolve().parent.parent / "config" / "rails" / "output_rails.co"
+
+GLUED_KEY = "sk-GLUEDabcdefghijklmnopqrstuv"
+GLUED_PII_REPLY = f"card4111111111111111 and id_{GLUED_KEY} and x4111-1111-1111-1111y"
+
+PII_CORPUS = [
+    "card4111111111111111",
+    "x4111-1111-1111-1111y",
+    "4111 1111 1111 1111",
+    f"_{GLUED_KEY}",
+    f"token={GLUED_KEY}",
+    f"abc{GLUED_KEY}",
+    "mail jane.doe@corp.io now",
+    "user_jane@corp.io",
+    GLUED_PII_REPLY,
+]
+
+
+def _colang_detectors():
+    """Extract the search() regexes from output_rails.co, undoing Colang's {{ }} escaping."""
+    source = OUTPUT_RAILS.read_text(encoding="utf-8")
+    raw = re.findall(r'search\("((?:[^"\\]|\\.)*)"', source)
+    assert len(raw) == 3, "expected card, email and key detectors in output_rails.co"
+    return [re.compile(rx.replace("{{", "{").replace("}}", "}")) for rx in raw]
+
+
+@pytest.mark.parametrize("text", PII_CORPUS)
+def test_masker_removes_everything_the_colang_rail_detects(text):
+    from backend.routes import mask_sensitive_entities
+
+    masked = asyncio.run(mask_sensitive_entities(text))
+    for detector in _colang_detectors():
+        assert not detector.search(masked), f"{detector.pattern!r} still matches {masked!r}"
+
+
+@pytest.mark.parametrize(
+    ("text", "token"),
+    [
+        ("card4111111111111111", "[REDACTED_CC]"),
+        (f"_{GLUED_KEY}", "[REDACTED_KEY]"),
+        (f"abc{GLUED_KEY}", None),  # not a key boundary per the Colang rail: left alone
+    ],
+)
+def test_masker_handles_glued_identifiers(text, token):
+    from backend.routes import mask_sensitive_entities
+
+    masked = asyncio.run(mask_sensitive_entities(text))
+    if token:
+        assert token in masked
+        assert "4111111111111111" not in masked and GLUED_KEY not in masked
+    else:
+        assert masked == text
+
+
+def test_glued_pii_from_llm_is_redacted_end_to_end(client, monkeypatch):
+    from mock_llm import MockLLM
+
+    monkeypatch.setattr(MockLLM, "_reply", lambda self, prompt: GLUED_PII_REPLY)
+    body = client.post("/api/v1/guard/chat", json={"prompt": "Summarize the CAP theorem"}).json()
+    assert body["verdict"] == "OUTPUT_ALTERED"
+    assert "4111111111111111" not in body["reply"]
+    assert "4111-1111-1111-1111" not in body["reply"]
+    assert GLUED_KEY not in body["reply"]
+
+
+def test_gateway_masks_reply_even_if_output_rail_misses(client, monkeypatch):
+    """Defense in depth: the gateway re-masks whatever the rails return."""
+    from backend import routes
+
+    async def leaky_rails(prompt):
+        return "reach me at leak.test@example.com, key sk-LEAKabcdefghijklmnopqrstu"
+
+    monkeypatch.setattr(routes, "_run_guarded", leaky_rails)
+    body = client.post("/api/v1/guard/chat", json={"prompt": "Summarize the CAP theorem"}).json()
+    assert body["verdict"] == "OUTPUT_ALTERED"
+    assert "leak.test@example.com" not in body["reply"]
+    assert "sk-LEAK" not in body["reply"]

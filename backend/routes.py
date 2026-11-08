@@ -180,7 +180,9 @@ async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
     if threat["rail_action"] == "BLOCKED":
         reply = BLOCK_MESSAGE
     else:
-        reply = await _run_guarded(prompt)
+        # Defense in depth: re-mask whatever the rails return, so PII never
+        # leaves the gateway even if the Colang output rail misses it.
+        reply = await mask_sensitive_entities(await _run_guarded(prompt))
     latency_ms = (time.perf_counter() - start) * 1000
     return reply, latency_ms, threat
 

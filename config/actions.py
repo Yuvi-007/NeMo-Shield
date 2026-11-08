@@ -17,9 +17,12 @@ from nemoguardrails.types import ChatMessage, Role
 # ---------------------------------------------------------------------------
 
 # Order matters: API keys first so their digits are never read as card numbers.
+# Boundaries must match the detectors in config/rails/output_rails.co exactly:
+# anything the rail detects has to be masked here, or it ships unredacted.
+# (`\b` is wrong here: it misses glued forms like "card4111..." and "_sk-...".)
 _MASKING_RULES = [
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
-    (re.compile(r"\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b"), "[REDACTED_CC]"),
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
+    (re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)"), "[REDACTED_CC]"),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
 ]
 

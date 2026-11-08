@@ -146,9 +146,19 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+# Prior conversation turns, set by the gateway as a Colang context update.
+HISTORY_CONTEXT_KEY = "conversation_history"
+_HISTORY_ROLES = {"user": Role.USER, "assistant": Role.ASSISTANT}
+
+
 @action(name="GenerateAnswerAction")
-async def generate_answer(user_message: str, llm: Any = None, config: Any = None) -> str:
-    """Call the main LLM (real or mock) with the system instructions."""
+async def generate_answer(
+    user_message: str,
+    llm: Any = None,
+    config: Any = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Call the main LLM (real or mock) with the system instructions and prior turns."""
     if llm is None:
         raise RuntimeError("No LLM configured. Set OPENAI_API_KEY or pass llm= to LLMRails.")
 
@@ -157,10 +167,14 @@ async def generate_answer(user_message: str, llm: Any = None, config: Any = None
     if instructions:
         system_prompt = instructions[0].content.strip()
 
-    response = await llm.generate_async(
-        [
-            ChatMessage(role=Role.SYSTEM, content=system_prompt),
-            ChatMessage.from_user(user_message),
-        ]
-    )
+    history = (context or {}).get(HISTORY_CONTEXT_KEY) or []
+    messages = [ChatMessage(role=Role.SYSTEM, content=system_prompt)]
+    messages += [
+        ChatMessage(role=_HISTORY_ROLES[turn["role"]], content=turn["content"])
+        for turn in history
+        if turn.get("role") in _HISTORY_ROLES
+    ]
+    messages.append(ChatMessage.from_user(user_message))
+
+    response = await llm.generate_async(messages)
     return (response.content or "").strip()

@@ -10,7 +10,7 @@ import unicodedata
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
@@ -25,6 +25,7 @@ from backend.models import (
     AuditLogEntry,
     ChatRequest,
     ChatResponse,
+    ChatTurn,
     SafetyVerdict,
     TelemetrySummary,
 )
@@ -58,6 +59,7 @@ _actions = _load_actions_module()
 classify_threat = _actions.classify_threat
 mask_sensitive_entities = _actions.mask_sensitive_entities
 OWASP_LLM01 = _actions.OWASP_LLM01
+HISTORY_CONTEXT_KEY = _actions.HISTORY_CONTEXT_KEY
 
 router = APIRouter(prefix="/api/v1")
 
@@ -161,13 +163,53 @@ def get_rails() -> LLMRails:
     return _rails
 
 
-async def _run_guarded(prompt: str) -> str:
-    """Run the full Colang input -> dialog -> output rail pipeline."""
-    result: Any = await get_rails().generate_async(messages=[{"role": "user", "content": prompt}])
+async def _run_guarded(prompt: str, history: Sequence[Dict[str, str]] = ()) -> str:
+    """Run the full Colang input -> dialog -> output rail pipeline for one turn.
+
+    Colang 2.x rejects `assistant` messages and treats every `user` message as
+    a new turn (one model call each), so prior turns travel as a context
+    update instead. GenerateAnswerAction reads them back from the context.
+    The context is always sent, even when empty, so nothing carries over
+    between requests.
+    """
+    messages = [
+        {"role": "context", "content": {HISTORY_CONTEXT_KEY: [dict(turn) for turn in history]}},
+        {"role": "user", "content": prompt},
+    ]
+    result: Any = await get_rails().generate_async(messages=messages)
     return result["content"] if isinstance(result, dict) else str(result)
 
 
-async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
+async def _scan_conversation(turns: Sequence[ChatTurn]) -> Dict[str, Any]:
+    """Score the latest turn first, then everything else the model will see.
+
+    History is client-supplied and is sent to the model, so an injection in an
+    earlier turn, a forged assistant turn, or an attack split across user
+    turns must be caught here too. The latest turn is scored first, so the
+    common single-turn block costs the same as before.
+
+    User turns are scored once, joined: any signature inside one turn is also
+    inside the joined text, and extra signals only raise the combined score.
+    Assistant turns (which a client can forge) are scored one by one, not
+    joined with user text, so model output cannot combine with user words
+    into a false positive.
+    """
+    latest = await classify_threat(canonicalize_text(turns[-1].content))
+    if latest["rail_action"] == "BLOCKED" or len(turns) == 1:
+        return latest
+    texts = [" ".join(turn.content for turn in turns if turn.role == "user")]
+    texts += [turn.content for turn in turns[:-1] if turn.role == "assistant"]
+    worst = latest
+    for text in texts:
+        result = await classify_threat(canonicalize_text(text))
+        if result["confidence"] > worst["confidence"]:
+            worst = result
+        if worst["rail_action"] == "BLOCKED":
+            break
+    return worst
+
+
+async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any]]:
     """Classify first; block high-confidence injections before NeMo runs.
 
     The classifier is the same ClassifyThreatAction the Colang input rail calls,
@@ -182,14 +224,17 @@ async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
     the canonical form would block has already been blocked here.
     """
     start = time.perf_counter()
-    threat = await classify_threat(canonicalize_text(prompt))
+    threat = await _scan_conversation(turns)
     if threat["rail_action"] == "BLOCKED":
         reply = BLOCK_MESSAGE
     else:
-        original = unicodedata.normalize("NFC", prompt)
+        latest = unicodedata.normalize("NFC", turns[-1].content)
+        history = [
+            {"role": turn.role, "content": unicodedata.normalize("NFC", turn.content)} for turn in turns[:-1]
+        ]
         # Defense in depth: re-mask whatever the rails return, so PII never
         # leaves the gateway even if the Colang output rail misses it.
-        reply = await mask_sensitive_entities(await _run_guarded(original))
+        reply = await mask_sensitive_entities(await _run_guarded(latest, history))
     latency_ms = (time.perf_counter() - start) * 1000
     return reply, latency_ms, threat
 
@@ -237,7 +282,8 @@ async def _record_telemetry_snapshot(summary: TelemetrySummary) -> None:
 async def guard_chat(
     request: ChatRequest, http_request: Request, background_tasks: BackgroundTasks
 ) -> ChatResponse:
-    reply, latency_ms, threat = await _guard(request.prompt)
+    turns = request.turns
+    reply, latency_ms, threat = await _guard(turns)
     verdict, category, confidence = _classify_reply(reply, threat)
     response = ChatResponse(
         reply=reply,
@@ -251,13 +297,14 @@ async def guard_chat(
         id=uuid4().hex,
         timestamp=response.timestamp,
         # Never persist raw user PII to the audit store.
-        prompt=await mask_sensitive_entities(request.prompt),
+        prompt=await mask_sensitive_entities(turns[-1].content),
         reply=response.reply,
         verdict=response.verdict,
         threat_category=response.threat_category,
         confidence=response.confidence,
         latency_ms=response.latency_ms,
         client_ip=get_client_ip(http_request),
+        session_id=request.session_id,
     )
     background_tasks.add_task(_record_audit_log, entry)
     return response
@@ -293,7 +340,7 @@ async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
 )
 async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
     unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
-    guarded_reply, guarded_ms, threat = await _guard(request.prompt)
+    guarded_reply, guarded_ms, threat = await _guard([ChatTurn(role="user", content=request.prompt)])
     verdict, _, _ = _classify_reply(guarded_reply, threat)
     return ABTestResponse(
         unguarded_reply=unguarded_reply,

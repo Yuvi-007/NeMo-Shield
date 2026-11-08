@@ -3,15 +3,41 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+MAX_TURN_CHARS = 2000
+MAX_TURNS = 20
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=MAX_TURN_CHARS)
 
 
 class ChatRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
+    """A single `prompt`, or a conversation in `messages` ending on a user turn."""
+
+    prompt: Optional[str] = Field(None, min_length=1, max_length=MAX_TURN_CHARS)
+    messages: Optional[List[ChatTurn]] = Field(None, min_length=1, max_length=MAX_TURNS)
     stream: bool = False
-    session_id: Optional[str] = None
+    session_id: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+
+    @model_validator(mode="after")
+    def _one_input_ending_on_user(self) -> "ChatRequest":
+        if (self.prompt is None) == (self.messages is None):
+            raise ValueError("send exactly one of 'prompt' or 'messages'")
+        if self.messages is not None and self.messages[-1].role != "user":
+            raise ValueError("the last turn in 'messages' must have role 'user'")
+        return self
+
+    @property
+    def turns(self) -> List[ChatTurn]:
+        """The conversation; a bare `prompt` is a single user turn."""
+        if self.messages is not None:
+            return list(self.messages)
+        return [ChatTurn(role="user", content=self.prompt)]
 
 
 class SafetyVerdict(str, Enum):
@@ -50,6 +76,7 @@ class AuditLogEntry(BaseModel):
     confidence: float
     latency_ms: float
     client_ip: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class TelemetrySummary(BaseModel):

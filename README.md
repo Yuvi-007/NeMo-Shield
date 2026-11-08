@@ -279,7 +279,7 @@ For NVIDIA NIM, set `engine: nim` and `model: meta/llama-3.1-8b-instruct` in `co
 cd frontend && npm install && npm run dev     # http://localhost:5173
 ```
 
-The console calls `VITE_API_BASE_URL` (default `http://localhost:8000/api/v1`). The header has a **Light / Dark / System** theme switch. The choice is saved in `localStorage` (`nemo-shield-theme`) and applied by an inline script in `index.html` before first paint, so the page doesn't flash the wrong theme. **System** follows the OS setting live. Body and secondary text meet WCAG AA (4.5:1) in both themes. For the Telemetry and Audit Ledger views, paste your `ADMIN_API_KEY` into the **Admin key** field in the header. It is kept in `sessionStorage` for that tab only and is never part of the build.
+The console calls `VITE_API_BASE_URL`. If it is unset, it calls the same origin at `/api/v1`, which `npm run dev` proxies to `http://127.0.0.1:8000` (override with `NEMO_API_PROXY_TARGET`). Production builds must set `VITE_API_BASE_URL`; without it the console shows a clear "got HTML instead of JSON" error rather than calling localhost. The header has a **Light / Dark / System** theme switch. The choice is saved in `localStorage` (`nemo-shield-theme`) and applied by an inline script in `index.html` before first paint, so the page doesn't flash the wrong theme. **System** follows the OS setting live. Body and secondary text meet WCAG AA (4.5:1) in both themes. For the Telemetry and Audit Ledger views, paste your `ADMIN_API_KEY` into the **Admin key** field in the header. It is kept in `sessionStorage` for that tab only and is never part of the build.
 
 | View | Purpose |
 |---|---|

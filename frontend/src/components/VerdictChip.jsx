@@ -11,7 +11,7 @@ const FROM_API = {
   OUTPUT_ALTERED: 'ALTERED',
 }
 
-export function toDisplayVerdict(apiVerdict) {
+function toDisplayVerdict(apiVerdict) {
   return FROM_API[apiVerdict] ?? apiVerdict
 }
 

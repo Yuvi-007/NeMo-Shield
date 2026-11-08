@@ -1,7 +1,9 @@
 import { Monitor, Moon, Sun } from 'lucide-react'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { getAdminKey, getHealth, setAdminKey } from '../services/api'
+import { getAdminKey, getAuthStatus, getHealth, setAdminKey, subscribeAuthStatus } from '../services/api'
 import { getThemePreference, setThemePreference, subscribeTheme } from '../theme'
+import { TABS } from '../tabs'
+import { ADMIN_KEY_INPUT_ID } from './Toaster'
 
 const THEME_OPTIONS = [
   { id: 'light', label: 'Light theme', Icon: Sun },
@@ -37,13 +39,6 @@ function ThemeToggle() {
   )
 }
 
-export const TABS = [
-  { id: 'playground', label: 'Playground' },
-  { id: 'telemetry', label: 'Telemetry' },
-  { id: 'policy', label: 'Policy Hub' },
-  { id: 'audit', label: 'Audit Ledger' },
-]
-
 function ShieldMark() {
   return (
     <svg viewBox="0 0 24 24" className="size-6" aria-hidden>
@@ -57,9 +52,17 @@ function ShieldMark() {
 // Session-only admin key entry for /telemetry and /audit/logs. Never bundled.
 // Saved on Enter or blur, not per keystroke: each save triggers a refetch, and
 // partial keys would only produce 401s and burn the per-IP rate-limit budget.
+const KEY_STATES = {
+  accepted: { dot: 'text-ok-fg', ring: 'border-line-strong', text: 'Admin key accepted' },
+  rejected: { dot: 'text-danger-fg', ring: 'border-danger/70', text: 'Admin key rejected (401)' },
+  missing: { dot: 'text-warn-fg', ring: 'border-warn/70', text: 'Admin key required (401)' },
+  unconfigured: { dot: 'text-warn-fg', ring: 'border-line-strong', text: 'Admin API disabled on the backend (503)' },
+}
+
 function AdminKeyField() {
   const [value, setValue] = useState(getAdminKey)
-  const saved = getAdminKey()
+  const status = useSyncExternalStore(subscribeAuthStatus, getAuthStatus)
+  const state = KEY_STATES[status]
 
   const save = () => {
     setAdminKey(value)
@@ -69,8 +72,15 @@ function AdminKeyField() {
   return (
     <label className="inline-flex items-center gap-1.5 text-fg-muted">
       <span className="hidden sm:inline">Admin key</span>
-      {saved && value === saved && <span className="text-ok-fg" aria-hidden>●</span>}
+      {state && (
+        <span className={state.dot} title={state.text} aria-hidden>
+          ●
+        </span>
+      )}
+      {state && <span className="sr-only">{state.text}</span>}
       <input
+        id={ADMIN_KEY_INPUT_ID}
+        aria-invalid={status === 'rejected' || status === 'missing' ? true : undefined}
         type="password"
         autoComplete="off"
         value={value}
@@ -82,7 +92,7 @@ function AdminKeyField() {
         title="Press Enter to apply"
         placeholder="X-Admin-Key"
         aria-label="Admin key"
-        className="w-32 rounded-md border border-line-strong bg-surface px-2 py-1 text-fg-2 placeholder:text-fg-faint focus:border-accent/60 focus:outline-none"
+        className={`w-32 rounded-md border ${state?.ring ?? 'border-line-strong'} bg-surface px-2 py-1 text-fg-2 placeholder:text-fg-faint focus:border-accent/60 focus:outline-none`}
       />
     </label>
   )

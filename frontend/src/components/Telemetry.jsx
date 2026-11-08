@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { describeError, getTelemetry, onAdminKeyChange } from '../services/api'
+import { getTelemetry, onAdminKeyChange } from '../services/api'
+import AdminErrorBanner from './AdminErrorBanner'
+import RailBreakdown from './RailBreakdown'
 
 // OWASP Top 10 for LLM Applications (2025). `covered` marks categories an active rail reports on.
 const OWASP_TOP_10 = [
@@ -55,22 +57,31 @@ export default function Telemetry() {
   const [updatedAt, setUpdatedAt] = useState(null)
   const [live, setLive] = useState(false)
 
-  const refresh = useCallback(async () => {
+  // State is only set in promise callbacks, so effects can call this directly.
+  const load = useCallback(
+    () =>
+      getTelemetry()
+        .then(
+          (summary) => {
+            setData(summary)
+            setError(null)
+            setUpdatedAt(new Date())
+          },
+          // Keep the error object: the banner picks its fallback from the status code.
+          (err) => setError(err),
+        )
+        .finally(() => setLoading(false)),
+    [],
+  )
+
+  const refresh = useCallback(() => {
     setLoading(true)
-    setError(null)
-    try {
-      setData(await getTelemetry())
-      setUpdatedAt(new Date())
-    } catch (err) {
-      setError(describeError(err))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+    return load()
+  }, [load])
 
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    load()
+  }, [load])
 
   // Refetch as soon as an admin key is saved in the header.
   useEffect(() => onAdminKeyChange(refresh), [refresh])
@@ -116,11 +127,7 @@ export default function Telemetry() {
         </button>
       </div>
 
-      {error && (
-        <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger-fg">
-          {error}
-        </p>
-      )}
+      <AdminErrorBanner error={error} onRetry={refresh} />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Kpi label="Total requests" value={total.toLocaleString()} detail="Through /guard/chat" />
@@ -140,6 +147,8 @@ export default function Telemetry() {
         />
         <Kpi label="Avg latency" value={(data?.avg_latency_ms ?? 0).toFixed(1)} unit="ms" detail="End-to-end, rails included" />
       </div>
+
+      <RailBreakdown data={data} />
 
       <section className="glass rounded-lg border border-line">
         <header className="flex flex-wrap items-baseline gap-2 border-b border-line px-4 py-3">

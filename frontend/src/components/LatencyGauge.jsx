@@ -1,34 +1,13 @@
-// Latency gauge on a log scale. Fast-path halts take ~0.04 ms and full Colang
-// runs ~125 ms: three-plus orders of magnitude apart, so a linear dial would
-// pin every fast-path block at zero.
+// Latency gauge on a log scale (see lib/latencyScale.js for why log).
+import { BUDGET_MS, FAST_PATH_MS, formatMs, position, zoneFor } from '../lib/latencyScale'
 
-const MIN_LOG = -2 // 0.01 ms
-const MAX_LOG = 3 // 1000 ms
-const FAST_PATH_MS = 1
-const BUDGET_MS = 100
 const CENTER = 64
 const RADIUS = 52
 const ARC = `M ${CENTER - RADIUS} ${CENTER} A ${RADIUS} ${RADIUS} 0 0 1 ${CENTER + RADIUS} ${CENTER}`
 
-function position(ms) {
-  if (!(ms > 0)) return 0
-  return Math.min(1, Math.max(0, (Math.log10(ms) - MIN_LOG) / (MAX_LOG - MIN_LOG)))
-}
-
 function pointAt(t, radius) {
   const angle = Math.PI * (1 - t)
   return [CENTER + radius * Math.cos(angle), CENTER - radius * Math.sin(angle)]
-}
-
-// Class names are spelled out in full so Tailwind's source scan can find them.
-function zoneFor(ms) {
-  if (ms < FAST_PATH_MS) return { name: 'Fast path', stroke: 'stroke-ok', dot: 'bg-ok', text: 'text-ok-fg' }
-  if (ms <= BUDGET_MS) return { name: 'Colang rails', stroke: 'stroke-accent', dot: 'bg-accent', text: 'text-accent' }
-  return { name: 'Over budget', stroke: 'stroke-warn', dot: 'bg-warn', text: 'text-warn-fg' }
-}
-
-function formatMs(ms) {
-  return ms < 1 ? `${ms.toFixed(2)} ms` : `${ms.toFixed(1)} ms`
 }
 
 const ZONES = [

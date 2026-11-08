@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.database import audit_store
 from backend.routes import get_rails, router
 
 
@@ -17,7 +18,9 @@ from backend.routes import get_rails, router
 async def lifespan(app: FastAPI):
     # Pre-warm: parse the Colang config and build LLMRails once at startup.
     app.state.rails = get_rails()
+    await audit_store.connect()
     yield
+    await audit_store.close()
 
 
 app = FastAPI(

@@ -8,18 +8,22 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, Query, Request
 from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
+from backend.database import audit_store
 from backend.models import (
     ABTestRequest,
     ABTestResponse,
+    AuditLogEntry,
     ChatRequest,
     ChatResponse,
     SafetyVerdict,
+    TelemetrySummary,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,12 +110,24 @@ async def health() -> Dict[str, Any]:
     return {"status": "healthy", "service": "NeMo-Shield", "rails_active": True}
 
 
+async def _record_audit_log(entry: AuditLogEntry) -> None:
+    await audit_store.insert_audit_log(entry.model_dump(mode="json"))
+
+
+async def _record_telemetry_snapshot(summary: TelemetrySummary) -> None:
+    snapshot = summary.model_dump(mode="json")
+    snapshot["timestamp"] = datetime.now(timezone.utc).isoformat()
+    await audit_store.insert_telemetry_snapshot(snapshot)
+
+
 @router.post("/guard/chat", response_model=ChatResponse)
-async def guard_chat(request: ChatRequest) -> ChatResponse:
+async def guard_chat(
+    request: ChatRequest, http_request: Request, background_tasks: BackgroundTasks
+) -> ChatResponse:
     threat = await classify_threat(request.prompt)
     reply, latency_ms = await _run_guarded(request.prompt)
     verdict, category, confidence = _classify_reply(reply, threat)
-    return ChatResponse(
+    response = ChatResponse(
         reply=reply,
         verdict=verdict,
         threat_category=category,
@@ -119,6 +135,38 @@ async def guard_chat(request: ChatRequest) -> ChatResponse:
         latency_ms=round(latency_ms, 2),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
+    entry = AuditLogEntry(
+        id=uuid4().hex,
+        timestamp=response.timestamp,
+        prompt=request.prompt,
+        reply=response.reply,
+        verdict=response.verdict,
+        threat_category=response.threat_category,
+        confidence=response.confidence,
+        latency_ms=response.latency_ms,
+        client_ip=http_request.client.host if http_request.client else None,
+    )
+    background_tasks.add_task(_record_audit_log, entry)
+    return response
+
+
+@router.get("/audit/logs", response_model=List[AuditLogEntry])
+async def get_audit_logs(
+    limit: int = Query(50, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    verdict: Optional[SafetyVerdict] = None,
+) -> List[AuditLogEntry]:
+    records = await audit_store.find_audit_logs(
+        limit=limit, skip=skip, verdict=verdict.value if verdict else None
+    )
+    return [AuditLogEntry(**record) for record in records]
+
+
+@router.get("/telemetry", response_model=TelemetrySummary)
+async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
+    summary = TelemetrySummary(**await audit_store.telemetry_summary())
+    background_tasks.add_task(_record_telemetry_snapshot, summary)
+    return summary
 
 
 @router.post("/guard/ab-test", response_model=ABTestResponse)

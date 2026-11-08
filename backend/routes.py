@@ -74,13 +74,28 @@ def get_rails() -> LLMRails:
     return _rails
 
 
-async def _run_guarded(prompt: str) -> Tuple[str, float]:
-    rails = get_rails()
+async def _run_guarded(prompt: str) -> str:
+    """Run the full Colang input -> dialog -> output rail pipeline."""
+    result: Any = await get_rails().generate_async(messages=[{"role": "user", "content": prompt}])
+    return result["content"] if isinstance(result, dict) else str(result)
+
+
+async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
+    """Classify first; block high-confidence injections before NeMo runs.
+
+    The classifier is the same ClassifyThreatAction the Colang input rail calls,
+    so a BLOCKED score here is a verdict the rail would reach anyway. Skipping
+    the Colang runtime for it saves ~100 ms. Everything else (benign, FLAGGED,
+    and PII output checks) still goes through the full rails.
+    """
     start = time.perf_counter()
-    result: Any = await rails.generate_async(messages=[{"role": "user", "content": prompt}])
+    threat = await classify_threat(prompt)
+    if threat["rail_action"] == "BLOCKED":
+        reply = BLOCK_MESSAGE
+    else:
+        reply = await _run_guarded(prompt)
     latency_ms = (time.perf_counter() - start) * 1000
-    reply = result["content"] if isinstance(result, dict) else str(result)
-    return reply, latency_ms
+    return reply, latency_ms, threat
 
 
 async def _run_unguarded(prompt: str) -> Tuple[str, float]:
@@ -124,8 +139,7 @@ async def _record_telemetry_snapshot(summary: TelemetrySummary) -> None:
 async def guard_chat(
     request: ChatRequest, http_request: Request, background_tasks: BackgroundTasks
 ) -> ChatResponse:
-    threat = await classify_threat(request.prompt)
-    reply, latency_ms = await _run_guarded(request.prompt)
+    reply, latency_ms, threat = await _guard(request.prompt)
     verdict, category, confidence = _classify_reply(reply, threat)
     response = ChatResponse(
         reply=reply,
@@ -172,8 +186,7 @@ async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
 @router.post("/guard/ab-test", response_model=ABTestResponse)
 async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
     unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
-    guarded_reply, guarded_ms = await _run_guarded(request.prompt)
-    threat = await classify_threat(request.prompt)
+    guarded_reply, guarded_ms, threat = await _guard(request.prompt)
     verdict, _, _ = _classify_reply(guarded_reply, threat)
     return ABTestResponse(
         unguarded_reply=unguarded_reply,

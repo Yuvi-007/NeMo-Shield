@@ -61,7 +61,10 @@ _THREAT_SIGNALS = [
     ),
     (
         "jailbreak_persona",
-        r"\b(DAN|do anything now|developer mode|jailbreak|god mode)\b",
+        # Mirrors both Colang `detect jailbreak persona` patterns, so the gateway
+        # fast path blocks everything the Layer-1 rail would.
+        r"\b(DAN|do anything now|developer mode|jailbreak|god mode)\b"
+        r"|\byou are now\b.{0,40}(unrestricted|unfiltered|uncensored|free of|without (any )?(rules|restrictions|limits))",
         0.85,
     ),
     (

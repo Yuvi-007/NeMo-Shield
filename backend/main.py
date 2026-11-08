@@ -5,14 +5,19 @@ Run:  uvicorn backend.main:app --reload
 
 from __future__ import annotations
 
-import os
-from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# Load .env before importing anything that reads env vars (DB, rails, admin key).
+load_dotenv()
 
-from backend.database import audit_store
-from backend.routes import get_rails, router
+import os  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from backend.database import audit_store  # noqa: E402
+from backend.routes import get_rails, router  # noqa: E402
 
 ALLOWED_ORIGINS = [
     origin.strip()

@@ -11,6 +11,7 @@ import logging
 import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger("nemo_shield.database")
 
@@ -24,6 +25,21 @@ try:
     from motor.motor_asyncio import AsyncIOMotorClient
 except ImportError:  # pragma: no cover - motor is listed in requirements.txt
     AsyncIOMotorClient = None  # type: ignore[assignment]
+
+
+def _redact_uri(uri: str) -> str:
+    """Hide the password in a MongoDB URI before it is printed."""
+    parts = urlsplit(uri)
+    if parts.password is None:
+        return uri
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit(parts._replace(netloc=f"{parts.username}:****@{host}"))
+
+
+def _report(message: str, level: int = logging.INFO) -> None:
+    """Log and print, so the active backend is visible even without log config."""
+    logger.log(level, message)
+    print(f"[NeMo-Shield DB] {message}", flush=True)
 
 
 def _empty_summary() -> Dict[str, Any]:
@@ -75,21 +91,31 @@ class AuditStore:
         if self._connected:
             return
         self._connected = True
-        if os.getenv("NEMO_SHIELD_FORCE_MEMORY_DB") == "1" or AsyncIOMotorClient is None:
-            logger.info("Audit store using in-memory fallback.")
+        if os.getenv("NEMO_SHIELD_FORCE_MEMORY_DB") == "1":
+            _report("Using IN-MEMORY audit store (NEMO_SHIELD_FORCE_MEMORY_DB=1).")
             return
-        uri = os.getenv("MONGODB_URI", DEFAULT_MONGODB_URI)
+        if AsyncIOMotorClient is None:
+            _report("Using IN-MEMORY audit store (motor is not installed).", logging.WARNING)
+            return
+        uri = os.getenv("MONGODB_URI")
+        source = "MONGODB_URI" if uri else "default"
+        uri = uri or DEFAULT_MONGODB_URI
+        safe_uri = _redact_uri(uri)
         try:
             client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=SERVER_SELECTION_TIMEOUT_MS)
             await client.admin.command("ping")
         except Exception as exc:  # noqa: BLE001 - any connection failure triggers fallback
-            logger.warning("MongoDB unavailable (%s); using in-memory audit store.", exc)
+            _report(
+                f"MongoDB unreachable at {safe_uri} ({source}): {exc}. "
+                "FELL BACK to IN-MEMORY audit store; data will not persist.",
+                logging.WARNING,
+            )
             return
         self._client = client
         self._db = client[DB_NAME]
         await self._db[AUDIT_LOGS].create_index("timestamp")
         await self._db[AUDIT_LOGS].create_index("verdict")
-        logger.info("Audit store connected to MongoDB database '%s'.", DB_NAME)
+        _report(f"Connected to LIVE MongoDB at {safe_uri} ({source}), database '{DB_NAME}'.")
 
     async def close(self) -> None:
         if self._client is not None:

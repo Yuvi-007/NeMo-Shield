@@ -62,8 +62,27 @@ def canonicalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+# Shipped as a default in earlier versions, so treat it as public and never accept it.
+LEGACY_DEFAULT_ADMIN_KEY = "dev-admin-secret-key"
+ADMIN_DISABLED_DETAIL = "Admin API disabled: ADMIN_API_KEY is not configured"
+
+
+def configured_admin_key() -> Optional[str]:
+    """Return the admin key, or None if it is unset, blank, or the legacy default."""
+    key = (os.getenv("ADMIN_API_KEY") or "").strip()
+    if not key or key == LEGACY_DEFAULT_ADMIN_KEY:
+        return None
+    return key
+
+
 def verify_admin_key(x_admin_key: Optional[str] = Header(None)) -> None:
-    expected = os.getenv("ADMIN_API_KEY", "dev-admin-secret-key")
+    expected = configured_admin_key()
+    if expected is None:
+        # Fail closed: no usable key means no admin access at all.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ADMIN_DISABLED_DETAIL,
+        )
     if not x_admin_key or not hmac.compare_digest(x_admin_key.encode(), expected.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -9,3 +9,7 @@ services:
         value: 3.12.10
       - key: MONGODB_URI
         sync: false
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        sync: false

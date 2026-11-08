@@ -10,12 +10,16 @@ import pytest
 os.environ["NEMO_SHIELD_FORCE_MOCK"] = "1"
 # Use the in-memory audit store so tests never depend on a live MongoDB.
 os.environ["NEMO_SHIELD_FORCE_MEMORY_DB"] = "1"
+# A non-default admin key: the old public default must never be accepted.
+TEST_ADMIN_KEY = "test-admin-key-3f9c1a7e5b"
+os.environ["ADMIN_API_KEY"] = TEST_ADMIN_KEY
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.main import app  # noqa: E402
 
-ADMIN_HEADERS = {"X-Admin-Key": "dev-admin-secret-key"}
+ADMIN_HEADERS = {"X-Admin-Key": TEST_ADMIN_KEY}
+LEGACY_DEFAULT_KEY = "dev-admin-secret-key"
 
 
 @pytest.fixture(scope="module")
@@ -291,6 +295,27 @@ def test_telemetry_with_admin_key_returns_200(client):
 
 def test_audit_logs_without_admin_key_returns_401(client):
     assert client.get("/api/v1/audit/logs").status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/api/v1/telemetry", "/api/v1/audit/logs"])
+def test_admin_routes_fail_closed_when_key_unset(client, monkeypatch, path):
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    for key in (LEGACY_DEFAULT_KEY, "", "anything"):
+        response = client.get(path, headers={"X-Admin-Key": key})
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Admin API disabled: ADMIN_API_KEY is not configured"}
+
+
+@pytest.mark.parametrize("configured", ["", "   ", LEGACY_DEFAULT_KEY])
+def test_admin_routes_reject_empty_or_legacy_default_key(client, monkeypatch, configured):
+    monkeypatch.setenv("ADMIN_API_KEY", configured)
+    response = client.get("/api/v1/telemetry", headers={"X-Admin-Key": configured})
+    assert response.status_code == 503
+
+
+def test_legacy_default_key_is_rejected_when_real_key_configured(client):
+    response = client.get("/api/v1/telemetry", headers={"X-Admin-Key": LEGACY_DEFAULT_KEY})
+    assert response.status_code == 401
 
 
 def test_rate_limit_ignores_forwarded_for_without_trusted_proxy(client, monkeypatch):

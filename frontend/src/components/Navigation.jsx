@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getHealth } from '../services/api'
+import { getAdminKey, getHealth, setAdminKey } from '../services/api'
 
 export const TABS = [
   { id: 'playground', label: 'Playground' },
@@ -15,6 +15,29 @@ function ShieldMark() {
       <path d="M7.5 12h9" stroke="currentColor" strokeWidth="1.5" />
       <path d="M12 7.5v9" stroke="currentColor" strokeWidth="1.5" strokeOpacity=".45" />
     </svg>
+  )
+}
+
+// Session-only admin key entry for /telemetry and /audit/logs. Never bundled.
+function AdminKeyField() {
+  const [value, setValue] = useState(getAdminKey)
+
+  return (
+    <label className="inline-flex items-center gap-1.5 text-slate-400">
+      <span className="hidden sm:inline">Admin key</span>
+      <input
+        type="password"
+        autoComplete="off"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value)
+          setAdminKey(e.target.value)
+        }}
+        placeholder="X-Admin-Key"
+        aria-label="Admin key"
+        className="w-32 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200 placeholder:text-slate-600 focus:border-sky-300/60 focus:outline-none"
+      />
+    </label>
   )
 }
 
@@ -52,6 +75,7 @@ export default function Navigation({ activeTab, onTabChange }) {
         </div>
 
         <div className="ml-auto flex items-center gap-2 text-xs">
+          <AdminKeyField />
           <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ring-1 ring-inset ${status.ring}`} role="status">
             <span className={`size-1.5 rounded-full ${status.dot} ${online ? 'animate-pulse' : ''}`} aria-hidden />
             {status.text}

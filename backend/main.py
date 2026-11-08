@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 from backend.database import audit_store  # noqa: E402
 from backend.routes import get_rails, router  # noqa: E402
+from backend.security import configured_admin_key  # noqa: E402
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -30,6 +31,12 @@ ALLOWED_ORIGINS = [
 async def lifespan(app: FastAPI):
     # Pre-warm: parse the Colang config and build LLMRails once at startup.
     app.state.rails = get_rails()
+    if configured_admin_key() is None:
+        print(
+            "[NeMo-Shield] WARNING: ADMIN_API_KEY is unset or uses the legacy default; "
+            "/telemetry and /audit/logs will return 503.",
+            flush=True,
+        )
     await audit_store.connect()
     yield
     await audit_store.close()

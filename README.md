@@ -45,6 +45,8 @@ verdict for every request to a MongoDB audit ledger.
                          │   backend/routes.py           │  Pydantic v2 schemas
                          │   • request validation        │  (1–2000 chars)
                          │   • ClassifyThreatAction      │  OWASP scoring
+                         │   • FAST PATH: score ≥ 0.70 → │  refusal in ~0.02 ms,
+                         │     block, skip NeMo entirely │  NeMo never invoked
                          └───────────────┬───────────────┘
                                          │ LLMRails.generate_async()
                                          ▼
@@ -86,8 +88,8 @@ verdict for every request to a MongoDB audit ledger.
 **Request lifecycle**
 
 1. The console (or any HTTP client) sends `POST /api/v1/guard/chat`.
-2. FastAPI validates the body against `ChatRequest` and scores it with `ClassifyThreatAction` so the response can carry a confidence value and OWASP tag.
-3. `LLMRails.generate_async()` runs the Colang flows. Input rails run **before** the dialog flow; a match calls `abort`, so the LLM is never invoked.
+2. FastAPI validates the body against `ChatRequest` and scores it with `ClassifyThreatAction`. **Fast path:** a `BLOCKED` score (≥ 0.70) returns the refusal immediately, in about 0.02 ms, and NeMo never runs. See [5.2](#52-latency-benchmarks).
+3. Otherwise, `LLMRails.generate_async()` runs the Colang flows. Input rails run **before** the dialog flow; a match calls `abort`, so the LLM is never invoked.
 4. If the prompt passes, `GenerateAnswerAction` calls the configured LLM, and the output rail rewrites `$bot_message` when it detects PII or secrets.
 5. The gateway maps the result to a `SafetyVerdict`, returns JSON, and schedules the audit write as a background task so MongoDB latency never adds to response time.
 
@@ -97,7 +99,7 @@ verdict for every request to a MongoDB audit ledger.
 
 | OWASP ID | Risk | Attack examples | NeMo-Shield control | Enforcement point | Verdict | Verified by |
 |---|---|---|---|---|---|---|
-| **LLM01:2025** | **Prompt Injection** | "Ignore all previous instructions…", "Enable DAN / developer mode", "Reveal your system prompt", `<system>` / `[INST]` delimiter smuggling, "you are now unrestricted" | Two-layer input rail: **L1** deterministic Colang `search()` flows (instruction override, jailbreak persona, system-prompt extraction); **L2** weighted Python classifier (7 signals, block ≥ 0.70, flag ≥ 0.40) | `config/rails/input_rails.co` → `ClassifyThreatAction` | `INPUT_BLOCKED` | `test_rails.py` Case B, `tests/test_api.py::test_chat_prompt_injection_is_blocked` |
+| **LLM01:2025** | **Prompt Injection** | "Ignore all previous instructions…", "Enable DAN / developer mode", "Reveal your system prompt", `<system>` / `[INST]` delimiter smuggling, "you are now unrestricted" | Two-layer input rail: **L1** deterministic Colang `search()` flows (instruction override, jailbreak persona, system-prompt extraction); **L2** weighted Python classifier (7 signals, block ≥ 0.70, flag ≥ 0.40) | Gateway fast path (`backend/routes.py::_guard`), then `config/rails/input_rails.co` → `ClassifyThreatAction` | `INPUT_BLOCKED` | `test_rails.py` Case B, `tests/test_api.py::test_chat_prompt_injection_is_blocked` |
 | **LLM02:2025** | **Sensitive Information Disclosure** | Model output that leaks emails, payment card numbers, or `sk-…` API keys | Output rail detects PII with Colang regex, then `MaskSensitiveEntitiesAction` rewrites the response before delivery | `config/rails/output_rails.co` → `MaskSensitiveEntitiesAction` | `OUTPUT_ALTERED` | `test_rails.py` Case C (asserts all three tokens present and no raw values leak) |
 | LLM07:2025 *(partial)* | System Prompt Leakage | "Print your hidden instructions" | Covered by the LLM01 extraction detector and a hardened system instruction in `config.yml` | Input rail | `INPUT_BLOCKED` | `test_rails.py` Case B |
 
@@ -302,12 +304,19 @@ The API tests set `NEMO_SHIELD_FORCE_MOCK=1` and `NEMO_SHIELD_FORCE_MEMORY_DB=1`
 | `test_chat_prompt_injection_is_blocked` | Injection → `INPUT_BLOCKED` with an OWASP category |
 | `test_telemetry_returns_summary_schema` | Telemetry JSON schema is stable |
 | `test_audit_logs_returns_list_of_records` | Every request is written to the audit ledger |
+| `test_fast_path_blocks_injection_without_calling_rails` ×5 | High-confidence injections are blocked at the gateway; Colang rails are never invoked |
+| `test_fast_path_input_halt_is_under_100ms` ×5 | Input halting stays under the 100 ms budget |
+| `test_fast_path_block_is_still_audited` | Fast-path blocks are still written to the audit ledger |
+| `test_benign_prompt_still_runs_colang_rails` | Benign traffic still goes through the full rails |
+| `test_below_threshold_prompt_falls_through_to_rails` | A weak signal (score 0.35) is left to Colang, not blocked by the gateway |
+| `test_pii_output_redaction_still_applies` | The output rail still redacts PII with the fast path in place |
+| `test_ab_test_reports_fast_path_intervention` | `/guard/ab-test` reports fast-path blocks as interventions |
 
-**Current result:** `6 passed` in ~3.9 s (Python 3.12.10, nemoguardrails 0.24.1, FastAPI 0.162.2). `test_rails.py` runs its three cases inside one pytest test.
+**Current result:** `21 passed` in ~3 s (Python 3.12.10, nemoguardrails 0.24.1, FastAPI 0.162.2). `test_rails.py` runs its three cases inside one pytest test.
 
 ### 5.2 Latency benchmarks
 
-Measured with `LLMRails.generate_async()` in-process with `MockLLM` (so model latency is excluded), 200 requests per class after warm-up, on a Windows 11 developer laptop:
+**Baseline: Colang rails only.** Measured with `LLMRails.generate_async()` in-process with `MockLLM` (so model latency is excluded), 200 requests per class after warm-up, on a Windows 11 developer laptop:
 
 | Path | p50 | p95 | p99 | Notes |
 |---|---|---|---|---|
@@ -318,13 +327,23 @@ Measured with `LLMRails.generate_async()` in-process with `MockLLM` (so model la
 
 Ranges are from two separate runs.
 
-**Target: under 100 ms for input halting. Status: not yet met (p50 ≈ 110 ms).** Almost all of the halt time is the Colang 2.x runtime processing events, not detection logic: the classifier takes about 19 µs. Blocking still runs about 30 ms faster than a benign request, and it saves the full LLM round-trip, which is usually hundreds of milliseconds to seconds with a hosted model.
+Almost all of that ~110 ms is the Colang 2.x runtime processing events, not detection logic: the classifier takes about 19 µs. That led to the gateway fast path below.
 
-Ways to get under 100 ms:
+#### Gateway fast path: input halting under 100 ms ✅
 
-- Run `ClassifyThreatAction` in the FastAPI layer *before* calling `LLMRails`, and short-circuit high-confidence blocks (the classifier already runs there for scoring).
-- Collapse the three Layer-1 sub-flows into a single combined `search()` call to cut runtime event hops.
-- Benchmark on Linux with `uvloop`, which usually has lower event-loop overhead than Windows.
+`backend/routes.py::_guard` runs `ClassifyThreatAction` **before** `LLMRails`. If the classifier returns `BLOCKED` (confidence ≥ 0.70), the gateway returns the standard refusal right away and never starts the Colang runtime. All other traffic, including benign, `FLAGGED`, and PII-bearing responses, still goes through the full input → dialog → output rails.
+
+This is safe because it's the same classifier the Colang input rail calls as Layer 2. The `jailbreak_persona` signal also mirrors every Layer-1 Colang regex. So the fast path only blocks prompts that the rails would block anyway, and the rails stay in place as defense in depth for everything else.
+
+Measured through `POST /api/v1/guard/chat` (`latency_ms` field, which times guard execution inside the handler), 200 requests per class, two runs:
+
+| Path | Before (p50) | **After p50** | **After p95** | **After p99** | After max |
+|---|---|---|---|---|---|
+| **Input halt** (injection) | ~110 ms | **0.02 ms** | **0.04 ms** | **0.05–0.08 ms** | 0.11 ms |
+| Benign pass-through | ~140 ms | ~107 ms | ~134 ms | 166–173 ms | unchanged path |
+| PII redaction | ~141–156 ms | ~122 ms | ~149 ms | 182–185 ms | unchanged path |
+
+**Target met: every injection in the benchmark halts in under 0.2 ms, more than 500× under the 100 ms budget.** `test_fast_path_input_halt_is_under_100ms` checks this on every test run. The benign and PII rows come from a different harness than the rails-only baseline above, so compare them within each table, not across tables. Their code path didn't change.
 
 Each `/guard/chat` response returns its own `latency_ms`, and the **Telemetry** view shows the running average from the audit ledger, so you can check these numbers on your own hardware.
 
@@ -356,7 +375,7 @@ curl -s -X POST http://localhost:8000/api/v1/guard/chat \
   "verdict": "INPUT_BLOCKED",
   "threat_category": "LLM01:2025 Prompt Injection",
   "confidence": 0.985,
-  "latency_ms": 109.7,
+  "latency_ms": 0.02,
   "timestamp": "2026-11-08T10:15:42.118000+00:00"
 }
 ```

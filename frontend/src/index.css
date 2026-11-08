@@ -70,7 +70,8 @@
     --color-fg-2: var(--color-slate-200);
     --color-fg-3: var(--color-slate-300);
     --color-fg-muted: var(--color-slate-400);
-    --color-fg-subtle: var(--color-slate-500);
+    /* 70/30 slate-400/500: >= 4.5:1 on canvas, surface, and muted (WCAG AA). */
+    --color-fg-subtle: color-mix(in oklab, var(--color-slate-400) 70%, var(--color-slate-500));
     --color-fg-faint: var(--color-slate-600);
 
     --color-accent: var(--color-sky-300);

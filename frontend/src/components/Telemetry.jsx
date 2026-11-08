@@ -156,7 +156,7 @@ export default function Telemetry() {
                 <span className="font-mono text-xs text-fg-subtle">{cat.id}</span>
                 <span className={`text-sm ${cat.covered ? 'text-fg-2' : 'text-fg-subtle'}`}>
                   {cat.name}
-                  {!cat.covered && <span className="ml-2 text-xs text-fg-faint">no rail</span>}
+                  {!cat.covered && <span className="ml-2 text-xs text-fg-subtle">no rail</span>}
                 </span>
                 <div
                   className="col-span-2 h-2 overflow-hidden rounded-full bg-muted sm:col-span-1"
@@ -172,7 +172,7 @@ export default function Telemetry() {
                   />
                 </div>
                 <span className="hidden text-right font-mono text-xs text-fg-muted tabular-nums sm:block">
-                  {count} <span className="text-fg-faint">· {share.toFixed(0)}%</span>
+                  {count} <span className="text-fg-subtle">· {share.toFixed(0)}%</span>
                 </span>
               </li>
             )

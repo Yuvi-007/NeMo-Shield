@@ -128,7 +128,7 @@ export default function Navigation({ activeTab, onTabChange }) {
             {status.text}
           </span>
           <span className="rounded-full px-2.5 py-1 text-fg-3 ring-1 ring-inset ring-line-strong">
-            NeMo v0.10+ <span className="text-fg-subtle">/</span> Colang 2.0
+            NeMo 0.24 <span className="text-fg-subtle">/</span> Colang 2.x
           </span>
           <ThemeToggle />
         </div>

@@ -5,6 +5,18 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NeMo-Shield Console</title>
+    <script>
+      // Apply the theme before first paint to avoid a light/dark flash.
+      // Mirrors src/theme.js; keep the storage key and logic in sync.
+      ;(function () {
+        var pref = 'system'
+        try {
+          pref = localStorage.getItem('nemo-shield-theme') || 'system'
+        } catch (e) {}
+        var dark = pref === 'dark' || (pref !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

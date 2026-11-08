@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { describeError, getAuditLogs, onAdminKeyChange } from '../services/api'
+import CopyButton from './CopyButton'
 import VerdictChip from './VerdictChip'
 
 const FILTERS = [
@@ -78,13 +79,13 @@ export default function AuditLedger() {
       <div className="flex flex-wrap items-end gap-4">
         <div className="mr-auto">
           <h1 className="text-2xl font-semibold tracking-tight">Audit ledger</h1>
-          <p className="mt-1 text-sm text-slate-400">The most recent {PAGE_SIZE} guarded requests, newest first.</p>
+          <p className="mt-1 text-sm text-fg-muted">The most recent {PAGE_SIZE} guarded requests, newest first.</p>
         </div>
         <button
           type="button"
           onClick={() => load(filter)}
           disabled={loading}
-          className="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-sky-300/60 disabled:opacity-50"
+          className="rounded-md border border-line-strong px-3 py-2 text-sm text-fg-2 transition-colors hover:border-accent/60 disabled:opacity-50"
         >
           Reload
         </button>
@@ -92,7 +93,7 @@ export default function AuditLedger() {
           type="button"
           onClick={() => exportJson(records, filter)}
           disabled={!records.length}
-          className="rounded-md bg-sky-300 px-3 py-2 text-sm font-semibold text-slate-950 transition-colors hover:bg-sky-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-canvas transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-line-strong disabled:text-fg-muted"
         >
           Export Audit JSON
         </button>
@@ -108,53 +109,59 @@ export default function AuditLedger() {
             onClick={() => setFilter(f.id)}
             className={`rounded-md px-3 py-1.5 font-mono text-xs transition-colors ${
               filter === f.id
-                ? 'bg-slate-100 text-slate-950'
-                : 'text-slate-400 ring-1 ring-inset ring-slate-700 hover:text-slate-200'
+                ? 'bg-fg text-canvas'
+                : 'text-fg-muted ring-1 ring-inset ring-line-strong hover:text-fg-2'
             }`}
             title={f.label}
           >
             {f.id}
           </button>
         ))}
-        <span className="ml-auto self-center text-xs text-slate-500 tabular-nums">
+        <span className="ml-auto self-center text-xs text-fg-subtle tabular-nums">
           {loading ? 'Loading…' : `${records.length} records`}
         </span>
       </div>
 
       {error && (
-        <p role="alert" className="rounded-md border border-red-400/40 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+        <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger-fg">
           {error}
         </p>
       )}
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
+      <div className="glass overflow-x-auto rounded-lg border border-line">
         <table className="w-full min-w-[56rem] border-collapse text-left text-[13px]">
-          <thead className="bg-slate-900 text-xs text-slate-400">
+          <thead className="bg-muted/60 text-xs text-fg-muted">
             <tr>
               <th scope="col" className="px-3 py-2 font-medium">Timestamp</th>
               <th scope="col" className="px-3 py-2 font-medium">Prompt</th>
               <th scope="col" className="px-3 py-2 font-medium">Reply</th>
               <th scope="col" className="px-3 py-2 font-medium">Verdict</th>
               <th scope="col" className="px-3 py-2 text-right font-medium">Latency</th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                <span className="sr-only">Copy record</span>
+              </th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/80">
+          <tbody className="divide-y divide-line/80">
             {records.map((r) => (
-              <tr key={r.id} className="align-top hover:bg-slate-900/60">
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-400 tabular-nums" title={r.timestamp}>
+              <tr key={r.id} className="align-top hover:bg-muted/50">
+                <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-fg-muted tabular-nums" title={r.timestamp}>
                   {formatTimestamp(r.timestamp)}
                 </td>
-                <td className="max-w-xs px-3 py-2 font-mono text-xs text-slate-200" title={r.prompt}>
+                <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-2" title={r.prompt}>
                   {snippet(r.prompt)}
                 </td>
-                <td className="max-w-xs px-3 py-2 font-mono text-xs text-slate-400" title={r.reply}>
+                <td className="max-w-xs px-3 py-2 font-mono text-xs text-fg-muted" title={r.reply}>
                   {snippet(r.reply)}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2">
-                  <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} />
+                  <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} animate={false} />
                 </td>
-                <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-slate-300 tabular-nums">
+                <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs text-fg-3 tabular-nums">
                   {r.latency_ms.toFixed(1)} ms
+                </td>
+                <td className="px-3 py-1.5 text-right">
+                  <CopyButton compact text={() => JSON.stringify(r, null, 2)} label="Copy record JSON" />
                 </td>
               </tr>
             ))}
@@ -162,7 +169,7 @@ export default function AuditLedger() {
         </table>
 
         {!loading && !error && records.length === 0 && (
-          <p className="px-4 py-10 text-center text-sm text-slate-500">
+          <p className="px-4 py-10 text-center text-sm text-fg-subtle">
             {filter === 'ALL'
               ? 'No requests logged yet. Send a prompt from the Playground to create the first entry.'
               : `No ${filter} records. Choose another filter or run a matching prompt.`}

@@ -1,8 +1,8 @@
 const STYLES = {
-  ALLOWED: { label: 'Allowed', className: 'bg-emerald-400/10 text-emerald-300 ring-emerald-400/30', dot: 'bg-emerald-400' },
-  BLOCKED: { label: 'Blocked', className: 'bg-red-400/10 text-red-300 ring-red-400/30', dot: 'bg-red-400' },
-  ALTERED: { label: 'Altered', className: 'bg-amber-400/10 text-amber-300 ring-amber-400/30', dot: 'bg-amber-400' },
-  UNGUARDED: { label: 'No rails', className: 'bg-slate-400/10 text-slate-300 ring-slate-400/25', dot: 'bg-slate-400' },
+  ALLOWED: { label: 'Allowed', className: 'bg-ok/10 text-ok-fg ring-ok/30', dot: 'bg-ok' },
+  BLOCKED: { label: 'Blocked', className: 'bg-danger/10 text-danger-fg ring-danger/30', dot: 'bg-danger' },
+  ALTERED: { label: 'Altered', className: 'bg-warn/10 text-warn-fg ring-warn/30', dot: 'bg-warn' },
+  UNGUARDED: { label: 'No rails', className: 'bg-fg-muted/10 text-fg-3 ring-fg-muted/25', dot: 'bg-fg-muted' },
 }
 
 const FROM_API = {
@@ -15,12 +15,13 @@ export function toDisplayVerdict(apiVerdict) {
   return FROM_API[apiVerdict] ?? apiVerdict
 }
 
-export default function VerdictChip({ verdict, title }) {
+export default function VerdictChip({ verdict, title, animate = true }) {
   const style = STYLES[toDisplayVerdict(verdict)] ?? STYLES.UNGUARDED
   return (
     <span
+      key={verdict}
       title={title ?? verdict}
-      className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style.className}`}
+      className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset transition-colors ${animate ? 'animate-chip-in' : ''} ${style.className}`}
     >
       <span aria-hidden className={`size-1.5 rounded-full ${style.dot}`} />
       {style.label}

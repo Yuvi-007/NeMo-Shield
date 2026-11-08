@@ -1,14 +1,87 @@
 @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
+/* Class strategy: `dark:` applies under <html class="dark">, set before first
+   paint by the inline script in index.html. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic color tokens. Components use these names (bg-surface, text-fg-muted,
+   border-line, text-danger-fg...) instead of raw palette shades, so a theme is
+   one block of variables. Light values here; dark overrides below. */
 @theme {
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-canvas: var(--color-slate-50);
+  --color-surface: var(--color-white);
+  --color-muted: var(--color-slate-100);
+  --color-line: var(--color-slate-200);
+  --color-line-strong: var(--color-slate-300);
+  --color-glass-edge: rgb(255 255 255 / 0.7);
+
+  --color-fg: var(--color-slate-900);
+  --color-fg-2: var(--color-slate-800);
+  --color-fg-3: var(--color-slate-700);
+  --color-fg-muted: var(--color-slate-600);
+  --color-fg-subtle: var(--color-slate-500);
+  --color-fg-faint: var(--color-slate-400);
+
+  --color-accent: var(--color-sky-600);
+  --color-accent-hover: var(--color-sky-700);
+
+  /* Solid status colors (dots, bars, borders) and their readable text tones. */
+  --color-ok: var(--color-emerald-500);
+  --color-ok-fg: var(--color-emerald-700);
+  --color-danger: var(--color-red-500);
+  --color-danger-fg: var(--color-red-700);
+  --color-warn: var(--color-amber-500);
+  --color-warn-fg: var(--color-amber-700);
+
+  --animate-chip-in: chip-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+
+  @keyframes chip-in {
+    from {
+      opacity: 0;
+      transform: scale(0.85);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
 }
 
 @layer base {
   :root {
+    color-scheme: light;
+  }
+
+  /* Cascade layers put `base` after `theme`, so these win over the light values. */
+  .dark {
     color-scheme: dark;
+    --color-canvas: var(--color-slate-950);
+    --color-surface: var(--color-slate-900);
+    --color-muted: var(--color-slate-800);
+    --color-line: var(--color-slate-800);
+    --color-line-strong: var(--color-slate-700);
+    --color-glass-edge: rgb(255 255 255 / 0.06);
+
+    --color-fg: var(--color-slate-100);
+    --color-fg-2: var(--color-slate-200);
+    --color-fg-3: var(--color-slate-300);
+    --color-fg-muted: var(--color-slate-400);
+    --color-fg-subtle: var(--color-slate-500);
+    --color-fg-faint: var(--color-slate-600);
+
+    --color-accent: var(--color-sky-300);
+    --color-accent-hover: var(--color-sky-200);
+
+    --color-ok: var(--color-emerald-400);
+    --color-ok-fg: var(--color-emerald-300);
+    --color-danger: var(--color-red-400);
+    --color-danger-fg: var(--color-red-300);
+    --color-warn: var(--color-amber-400);
+    --color-warn-fg: var(--color-amber-300);
   }
 
   html,
@@ -18,15 +91,39 @@
   }
 
   body {
-    @apply bg-slate-950 text-slate-100 font-sans antialiased;
+    @apply bg-canvas text-fg font-sans antialiased;
+    /* A faint accent glow at the top gives the glass panels something to blur. */
+    background-image: radial-gradient(
+      60rem 28rem at 50% -8rem,
+      color-mix(in oklab, var(--color-accent) 10%, transparent),
+      transparent
+    );
+    background-attachment: fixed;
+    transition:
+      background-color 200ms ease,
+      color 200ms ease;
   }
 
   :focus-visible {
-    @apply outline-2 outline-offset-2 outline-sky-300;
+    @apply outline-2 outline-offset-2 outline-accent;
   }
 
   ::selection {
-    @apply bg-sky-300/30;
+    @apply bg-accent/25;
+  }
+}
+
+/* Frosted panel: translucent surface, hairline border, top highlight.
+   Falls back to an opaque surface where backdrop-filter is unsupported. */
+@utility glass {
+  background-color: var(--color-surface);
+  box-shadow:
+    inset 0 1px 0 0 var(--color-glass-edge),
+    0 1px 2px 0 rgb(15 23 42 / 0.05);
+
+  @supports (backdrop-filter: blur(1px)) {
+    background-color: color-mix(in oklab, var(--color-surface) 72%, transparent);
+    backdrop-filter: blur(12px) saturate(140%);
   }
 }
 

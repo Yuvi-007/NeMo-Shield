@@ -1,5 +1,41 @@
-import { useEffect, useState } from 'react'
+import { Monitor, Moon, Sun } from 'lucide-react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getAdminKey, getHealth, setAdminKey } from '../services/api'
+import { getThemePreference, setThemePreference, subscribeTheme } from '../theme'
+
+const THEME_OPTIONS = [
+  { id: 'light', label: 'Light theme', Icon: Sun },
+  { id: 'dark', label: 'Dark theme', Icon: Moon },
+  { id: 'system', label: 'Match system theme', Icon: Monitor },
+]
+
+function ThemeToggle() {
+  const preference = useSyncExternalStore(subscribeTheme, getThemePreference)
+
+  return (
+    <div role="radiogroup" aria-label="Color theme" className="inline-flex rounded-full p-0.5 ring-1 ring-inset ring-line-strong">
+      {THEME_OPTIONS.map(({ id, label, Icon }) => {
+        const active = preference === id
+        return (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={label}
+            title={label}
+            onClick={() => setThemePreference(id)}
+            className={`rounded-full p-1.5 transition-colors ${
+              active ? 'bg-muted text-fg shadow-sm' : 'text-fg-subtle hover:text-fg-2'
+            }`}
+          >
+            <Icon className="size-3.5" aria-hidden />
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 export const TABS = [
   { id: 'playground', label: 'Playground' },
@@ -31,9 +67,9 @@ function AdminKeyField() {
   }
 
   return (
-    <label className="inline-flex items-center gap-1.5 text-slate-400">
+    <label className="inline-flex items-center gap-1.5 text-fg-muted">
       <span className="hidden sm:inline">Admin key</span>
-      {saved && value === saved && <span className="text-emerald-300" aria-hidden>●</span>}
+      {saved && value === saved && <span className="text-ok-fg" aria-hidden>●</span>}
       <input
         type="password"
         autoComplete="off"
@@ -46,7 +82,7 @@ function AdminKeyField() {
         title="Press Enter to apply"
         placeholder="X-Admin-Key"
         aria-label="Admin key"
-        className="w-32 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200 placeholder:text-slate-600 focus:border-sky-300/60 focus:outline-none"
+        className="w-32 rounded-md border border-line-strong bg-surface px-2 py-1 text-fg-2 placeholder:text-fg-faint focus:border-accent/60 focus:outline-none"
       />
     </label>
   )
@@ -71,18 +107,18 @@ export default function Navigation({ activeTab, onTabChange }) {
 
   const status =
     online === null
-      ? { text: 'Checking', dot: 'bg-slate-400', ring: 'ring-slate-500/30 text-slate-300' }
+      ? { text: 'Checking', dot: 'bg-fg-muted', ring: 'ring-fg-subtle/30 text-fg-3' }
       : online
-        ? { text: 'Online', dot: 'bg-emerald-400', ring: 'ring-emerald-400/30 text-emerald-300' }
-        : { text: 'Offline', dot: 'bg-red-400', ring: 'ring-red-400/30 text-red-300' }
+        ? { text: 'Online', dot: 'bg-ok', ring: 'ring-ok/30 text-ok-fg' }
+        : { text: 'Offline', dot: 'bg-danger', ring: 'ring-danger/30 text-danger-fg' }
 
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-line bg-canvas/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-3 px-4 pt-3 sm:px-6">
-        <div className="flex items-center gap-2.5 text-sky-300">
+        <div className="flex items-center gap-2.5 text-accent">
           <ShieldMark />
-          <span className="text-lg font-semibold tracking-tight text-slate-100">NeMo-Shield</span>
-          <span className="hidden text-sm text-slate-500 sm:inline">Guardrails console</span>
+          <span className="text-lg font-semibold tracking-tight text-fg">NeMo-Shield</span>
+          <span className="hidden text-sm text-fg-subtle sm:inline">Guardrails console</span>
         </div>
 
         <div className="ml-auto flex items-center gap-2 text-xs">
@@ -91,9 +127,10 @@ export default function Navigation({ activeTab, onTabChange }) {
             <span className={`size-1.5 rounded-full ${status.dot} ${online ? 'animate-pulse' : ''}`} aria-hidden />
             {status.text}
           </span>
-          <span className="rounded-full px-2.5 py-1 text-slate-300 ring-1 ring-inset ring-slate-700">
-            NeMo v0.10+ <span className="text-slate-500">/</span> Colang 2.0
+          <span className="rounded-full px-2.5 py-1 text-fg-3 ring-1 ring-inset ring-line-strong">
+            NeMo v0.10+ <span className="text-fg-subtle">/</span> Colang 2.0
           </span>
+          <ThemeToggle />
         </div>
 
         <nav className="-mb-px flex w-full gap-1 overflow-x-auto" aria-label="Console views">
@@ -106,7 +143,7 @@ export default function Navigation({ activeTab, onTabChange }) {
                 onClick={() => onTabChange(tab.id)}
                 aria-current={active ? 'page' : undefined}
                 className={`whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
-                  active ? 'border-sky-300 text-slate-100' : 'border-transparent text-slate-400 hover:text-slate-200'
+                  active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg-2'
                 }`}
               >
                 {tab.label}

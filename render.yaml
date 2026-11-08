@@ -17,3 +17,5 @@ services:
         value: "1"
       - key: TRUSTED_PROXY_HOPS
         value: "1"
+      - key: ENVIRONMENT
+        value: production

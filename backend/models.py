@@ -89,6 +89,9 @@ class ABTestRequest(BaseModel):
 
 
 class ABTestResponse(BaseModel):
+    # The unguarded side is always the offline MockLLM, never a real model, so
+    # this public endpoint cannot be used to query a model without rails.
+    baseline: Literal["deterministic-mock"] = "deterministic-mock"
     unguarded_reply: str
     guarded_reply: str
     intervened: bool

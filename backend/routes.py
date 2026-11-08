@@ -149,6 +149,7 @@ async def enforce_rate_limit(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=RATE_LIMIT_DETAIL)
 
 _rails: Optional[LLMRails] = None
+# The /guard/ab-test baseline. Deliberately always the offline mock: see guard_ab_test.
 _base_llm = MockLLM()
 
 
@@ -356,6 +357,14 @@ async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
     "/guard/ab-test", response_model=ABTestResponse, dependencies=[Depends(enforce_rate_limit)]
 )
 async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
+    """Guarded reply next to a local, deterministic mock baseline.
+
+    The endpoint is public, so the unguarded side must never reach a real
+    model: that would let anyone skip the rails. `_base_llm` is always the
+    offline MockLLM, whatever OPENAI_API_KEY says (tests enforce this). When a
+    real model is configured, `latency_delta_ms` is guarded-real vs mock, not
+    pure rail overhead.
+    """
     unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
     guarded_reply, guarded_ms, threat, _ = await _guard([ChatTurn(role="user", content=request.prompt)])
     verdict, _, _ = _classify_reply(guarded_reply, threat)

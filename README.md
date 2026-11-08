@@ -236,7 +236,7 @@ uvicorn backend.main:app --reload --port 8000
 `backend/main.py` calls `load_dotenv()` before anything else is imported. At startup it builds `LLMRails` once and prints which audit store is active (`Connected to LIVE MongoDB …` or `FELL BACK to IN-MEMORY …`).
 
 - Health: <http://localhost:8000/api/v1/health>
-- OpenAPI: <http://localhost:8000/docs>
+- OpenAPI: <http://localhost:8000/docs> (disabled when `ENVIRONMENT=production`)
 
 ### `.env` reference
 
@@ -269,6 +269,7 @@ OPENAI_API_KEY=
 | `ALLOWED_ORIGINS` | localhost:5173 | Must include the Vercel origin in production |
 | `BEHIND_TRUSTED_PROXY` | off | When `1`, the client IP is read from `X-Forwarded-For` |
 | `TRUSTED_PROXY_HOPS` | `1` | Client IP = Nth entry from the right. Entries further left are client-supplied and ignored. |
+| `ENVIRONMENT` | unset | `production` turns off `/docs`, `/redoc`, and `/openapi.json`. Security headers (`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, and HSTS on HTTPS) are always sent; HSTS trusts `X-Forwarded-Proto` only under `BEHIND_TRUSTED_PROXY=1`. |
 | `OPENAI_API_KEY` | none → MockLLM | Model is set in `config/config.yml` (`gpt-4o-mini`, T=0.0) |
 
 For NVIDIA NIM, set `engine: nim` and `model: meta/llama-3.1-8b-instruct` in `config/config.yml`, then export `NVIDIA_API_KEY`.
@@ -328,6 +329,7 @@ start:  uvicorn backend.main:app --host 0.0.0.0 --port $PORT
 | `ALLOWED_ORIGINS` | `https://<your-app>.vercel.app` (comma-separate several) | yes |
 | `BEHIND_TRUSTED_PROXY` | `1`. Render's edge proxy appends the real client IP to `X-Forwarded-For`. | yes (set by blueprint) |
 | `TRUSTED_PROXY_HOPS` | `1`. Raise it if you put a CDN in front of Render. | yes (set by blueprint) |
+| `ENVIRONMENT` | `production` (hides the OpenAPI docs) | yes (set by blueprint) |
 | `OPENAI_API_KEY` | Provider key. Leave it unset to run on `MockLLM`. | no |
 
 ### Frontend on Vercel
@@ -405,7 +407,7 @@ Base path `/api/v1`.
 |---|---|---|---|---|
 | `GET` | `/health` | — | — | Liveness |
 | `POST` | `/guard/chat` | — | yes | Guarded completion → `ChatResponse`. Body: `{"prompt": "..."}` **or** `{"messages": [{"role": "user" \| "assistant", "content": "..."}, ...]}`, plus optional `session_id` |
-| `POST` | `/guard/ab-test` | — | yes | Unguarded vs guarded replies side by side |
+| `POST` | `/guard/ab-test` | — | yes | Guarded reply next to a local deterministic mock baseline (`baseline: "deterministic-mock"`). The unguarded side never calls a real model, so this public route can't bypass the rails. |
 | `GET` | `/audit/logs?limit=&skip=&verdict=` | `X-Admin-Key` | yes | Paginated ledger, newest first (`limit` ≤ 500) |
 | `GET` | `/telemetry` | `X-Admin-Key` | yes | Aggregates via a MongoDB `$facet` pipeline |
 

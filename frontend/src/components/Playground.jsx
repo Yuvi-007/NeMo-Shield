@@ -20,7 +20,7 @@ const VIEWS = [
     id: 'single',
     label: 'Single-Turn Compare',
     blurb:
-      'Send one prompt through the gateway and see what the model would have said without NeMo rails, next to what actually reaches the user.',
+      'Send one prompt through the gateway and compare an unguarded local mock baseline with what actually reaches the user through NeMo rails.',
   },
   {
     id: 'thread',
@@ -223,8 +223,8 @@ export default function Playground() {
             {result.mode === 'compare' ? (
               <div className="grid gap-4 lg:grid-cols-[1fr_auto_1fr]">
                 <OutputPanel
-                  title="Raw LLM"
-                  subtitle="Same model, no rails"
+                  title="Unguarded baseline"
+                  subtitle="Local deterministic mock, no rails. The public A/B endpoint never calls a real model."
                   verdict="UNGUARDED"
                   tone="raw"
                   latency={<LatencyBadge>baseline</LatencyBadge>}
@@ -242,7 +242,7 @@ export default function Playground() {
                       <LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>
                       <LatencyBadge>
                         {ab.latency_delta_ms >= 0 ? '+' : ''}
-                        {ab.latency_delta_ms.toFixed(1)} ms vs raw
+                        {ab.latency_delta_ms.toFixed(1)} ms vs baseline
                       </LatencyBadge>
                     </>
                   }

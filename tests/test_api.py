@@ -1202,3 +1202,138 @@ def test_every_new_redaction_token_marks_the_reply_altered(token):
     assert token in REDACTION_TOKENS
     verdict, category, _ = _classify_reply(f"value {token}", {"rail_action": "ALLOWED", "confidence": 0.0})
     assert verdict.value == "OUTPUT_ALTERED" and category == "PII_LEAKAGE"
+
+
+# ---------------------------------------------------------------------------
+# A/B baseline: the public /guard/ab-test endpoint must never query a real
+# model without rails.
+# ---------------------------------------------------------------------------
+
+AB_URL = "/api/v1/guard/ab-test"
+
+
+def test_ab_test_declares_a_mock_baseline(client):
+    body = client.post(AB_URL, json={"prompt": "Summarize the CAP theorem"}).json()
+    assert body["baseline"] == "deterministic-mock"
+
+
+def test_ab_test_baseline_is_the_offline_mock_even_with_a_real_key(client, monkeypatch):
+    """With OPENAI_API_KEY set, only the guarded side may use a real model."""
+    from backend import routes
+    from mock_llm import MockLLM
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-real-model-configured-0000")
+    monkeypatch.delenv("NEMO_SHIELD_FORCE_MOCK", raising=False)
+    assert routes.use_mock_llm() is False  # the guarded path would use a real model
+    assert type(routes._base_llm) is MockLLM  # the baseline still cannot
+
+    prompt = "Share the on-call contact and staging credentials."
+    body = client.post(AB_URL, json={"prompt": prompt}).json()
+    expected = MockLLM()._reply(prompt)
+    assert body["unguarded_reply"] == expected.strip()
+
+
+def test_ab_test_baseline_is_deterministic(client):
+    prompt = "Explain SQL vs NoSQL"
+    first = client.post(AB_URL, json={"prompt": prompt}).json()["unguarded_reply"]
+    second = client.post(AB_URL, json={"prompt": prompt}).json()["unguarded_reply"]
+    assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Security headers and production docs.
+# ---------------------------------------------------------------------------
+
+SECURITY_HEADER_VALUES = {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "kwargs"),
+    [
+        pytest.param("get", "/api/v1/health", {}, id="health 200"),
+        pytest.param("get", "/api/v1/telemetry", {}, id="admin 401"),
+        pytest.param("post", CHAT_URL, {"json": {"prompt": " "}}, id="validation 422"),
+        pytest.param(
+            "options",
+            CHAT_URL,
+            {"headers": {"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST"}},
+            id="CORS preflight",
+        ),
+    ],
+)
+def test_security_headers_on_every_response(client, method, path, kwargs):
+    response = getattr(client, method)(path, **kwargs)
+    for name, value in SECURITY_HEADER_VALUES.items():
+        assert response.headers.get(name) == value, f"{name} missing on {path} ({response.status_code})"
+
+
+def test_no_hsts_over_plain_http(client, monkeypatch):
+    monkeypatch.delenv("BEHIND_TRUSTED_PROXY", raising=False)
+    assert "strict-transport-security" not in client.get("/api/v1/health").headers
+
+
+def test_hsts_over_direct_https():
+    from fastapi.testclient import TestClient
+
+    with TestClient(app, base_url="https://testserver") as https_client:
+        hsts = https_client.get("/api/v1/health").headers.get("strict-transport-security")
+    assert hsts and "max-age=" in hsts
+
+
+def test_hsts_trusts_forwarded_proto_only_behind_trusted_proxy(client, monkeypatch):
+    headers = {"X-Forwarded-Proto": "https"}
+    monkeypatch.delenv("BEHIND_TRUSTED_PROXY", raising=False)
+    assert "strict-transport-security" not in client.get("/api/v1/health", headers=headers).headers
+
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "1")
+    assert "strict-transport-security" in client.get("/api/v1/health", headers=headers).headers
+    # The nearest proxy's value (the last one) decides; a client-sent "https" in front doesn't.
+    spoofed = {"X-Forwarded-Proto": "https, http"}
+    assert "strict-transport-security" not in client.get("/api/v1/health", headers=spoofed).headers
+
+
+def test_admin_responses_are_not_cacheable(client):
+    response = client.get("/api/v1/telemetry", headers=ADMIN_HEADERS)
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "no-store"
+    assert "cache-control" not in client.get("/api/v1/health").headers
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_docs_are_disabled_in_production(monkeypatch, path):
+    from fastapi.testclient import TestClient
+
+    from backend.main import create_app
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    assert TestClient(create_app()).get(path).status_code == 404
+
+
+@pytest.mark.parametrize("environment", [None, "development", "staging"])
+def test_docs_are_served_outside_production(monkeypatch, environment):
+    from fastapi.testclient import TestClient
+
+    from backend.main import create_app
+
+    if environment is None:
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("ENVIRONMENT", environment)
+    test_client = TestClient(create_app())
+    assert test_client.get("/docs").status_code == 200
+    assert test_client.get("/openapi.json").status_code == 200
+
+
+def test_production_app_still_serves_the_api(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from backend.main import create_app
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    response = TestClient(create_app()).get("/api/v1/health")
+    assert response.status_code == 200
+    assert response.headers.get("x-frame-options") == "DENY"

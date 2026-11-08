@@ -1,6 +1,12 @@
-# NeMo-Shield
+# NeMo-Shield: Production LLM Guardrail Gateway & Threat Interceptor
 
 A runtime guardrails gateway for LLM applications, built on NVIDIA NeMo Guardrails (Colang 2.x) and FastAPI.
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/31275374-1b1d-40a6-a5ec-50fb64204d7a" controls="controls" muted="muted" style="max-width: 100%;">
+    Your browser does not support the video tag.
+  </video>
+</p>
 
 Every prompt is canonicalized and scored before any model call. High-confidence injections are rejected in about 40 µs, without starting the Colang runtime. Everything else goes through NeMo input, dialog, and output rails. Model output is scanned for credentials and PII before it leaves the gateway, and each request is written, with PII removed, to a MongoDB audit ledger that only admins can read.
 

@@ -23,7 +23,10 @@ from nemoguardrails.types import ChatMessage, Role
 _MASKING_RULES = [
     (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
     (re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)"), "[REDACTED_CC]"),
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
+    # The look-behind lets a match start only at the beginning of a run of
+    # local-part characters. Without it, a long run with no "@" (digits, "aaaa",
+    # "sk-sk-...") is rescanned from every position: quadratic, ~12 s on 100k chars.
+    (re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
 ]
 
 

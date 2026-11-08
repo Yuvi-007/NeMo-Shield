@@ -13,7 +13,8 @@ flow mask_pii_output $output_text
   global $bot_message
 
   $has_cc = search("(?<!\d)\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}(?!\d)", $output_text)
-  $has_email = search("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}", $output_text)
+  # Look-behind keeps this linear (see _MASKING_RULES in config/actions.py).
+  $has_email = search("(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}", $output_text)
   $has_key = search("(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{{20,}}", $output_text)
 
   if $has_cc or $has_email or $has_key

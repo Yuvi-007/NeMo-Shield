@@ -569,3 +569,73 @@ def test_gateway_masks_reply_even_if_output_rail_misses(client, monkeypatch):
     assert body["verdict"] == "OUTPUT_ALTERED"
     assert "leak.test@example.com" not in body["reply"]
     assert "sk-LEAK" not in body["reply"]
+
+
+# ---------------------------------------------------------------------------
+# ReDoS: every regex on the request path must run in linear time.
+# Model replies have no length cap, so masking must survive 100k-char output.
+# ---------------------------------------------------------------------------
+
+import time  # noqa: E402
+
+REDOS_N = 100_000
+REDOS_BUDGET_MS = 250  # linear patterns take a few ms here; quadratic ones take seconds
+
+REDOS_INPUTS = {
+    "local-part run, no @": "a" * REDOS_N,
+    "dotted domain, bad TLD": "a@" + "a." * (REDOS_N // 2) + "!",
+    "domain run, no dot": "a@" + "a" * REDOS_N,
+    "repeated a@": "a@" * (REDOS_N // 2),
+    "repeated @a.": "@a." * (REDOS_N // 3),
+    "repeated sk- prefix": "sk-" * (REDOS_N // 3),
+    "digit run": "1" * REDOS_N,
+    "spaced digits": "1 " * (REDOS_N // 2),
+}
+
+
+def _elapsed_ms(fn, *args):
+    start = time.perf_counter()
+    fn(*args)
+    return (time.perf_counter() - start) * 1000
+
+
+@pytest.mark.parametrize("name", list(REDOS_INPUTS))
+def test_masker_is_linear_on_adversarial_input(name):
+    from backend.routes import mask_sensitive_entities
+
+    elapsed = _elapsed_ms(lambda t: asyncio.run(mask_sensitive_entities(t)), REDOS_INPUTS[name])
+    assert elapsed < REDOS_BUDGET_MS, f"masker took {elapsed:.0f} ms on {name!r}"
+
+
+@pytest.mark.parametrize("name", list(REDOS_INPUTS))
+def test_colang_detectors_are_linear_on_adversarial_input(name):
+    for detector in _colang_detectors():
+        elapsed = _elapsed_ms(detector.search, REDOS_INPUTS[name])
+        assert elapsed < REDOS_BUDGET_MS, f"{detector.pattern!r} took {elapsed:.0f} ms on {name!r}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ignore " * 6000,
+        "reveal " * 6000,
+        "you are now " * 4000,
+        "a " * 20000,
+        "ﷺ" * 2000,  # max-length prompt that NFKD expands 18x
+    ],
+)
+def test_canonicalize_and_classify_are_bounded_on_adversarial_input(text):
+    from backend.routes import classify_threat
+    from backend.security import canonicalize_text
+
+    elapsed = _elapsed_ms(lambda t: asyncio.run(classify_threat(canonicalize_text(t))), text)
+    assert elapsed < REDOS_BUDGET_MS, f"classifier took {elapsed:.0f} ms"
+
+
+def test_email_masking_still_catches_addresses_after_redos_fix():
+    from backend.routes import mask_sensitive_entities
+
+    text = "mail a.b+tag@sub.example.co.uk, (x@y.io); user_jane@corp.io. end@x.com"
+    masked = asyncio.run(mask_sensitive_entities(text))
+    assert "@" not in masked
+    assert masked.count("[REDACTED_EMAIL]") == 4

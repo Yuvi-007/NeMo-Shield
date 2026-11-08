@@ -8,6 +8,7 @@ in-process dict store so the API (and tests) keep working without a live DB.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,11 @@ DB_NAME = "nemo_shield"
 AUDIT_LOGS = "audit_logs"
 TELEMETRY_SNAPSHOTS = "telemetry_snapshots"
 SERVER_SELECTION_TIMEOUT_MS = 1500
+
+# Latency zones shown on the console gauge: the gateway fast path halts in
+# well under 1 ms; a full Colang pass is budgeted at 100 ms.
+FAST_PATH_MS = 1.0
+COLANG_BUDGET_MS = 100.0
 
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
@@ -51,7 +57,36 @@ def _empty_summary() -> Dict[str, Any]:
         "block_rate_pct": 0.0,
         "avg_latency_ms": 0.0,
         "threat_distribution": {},
+        "fast_path_blocks": 0,
+        "colang_blocks": 0,
+        "sanitized_outputs": 0,
+        "p50_latency_ms": 0.0,
+        "p99_latency_ms": 0.0,
+        "latency_zones": {"under_1ms": 0, "1_to_100ms": 0, "over_100ms": 0},
     }
+
+
+def nearest_rank_index(count: int, pct: float) -> int:
+    """0-based index of the nearest-rank percentile in a sorted list of `count` values."""
+    return min(count - 1, max(0, math.ceil(pct / 100 * count) - 1))
+
+
+def percentile(sorted_values: List[float], pct: float) -> float:
+    if not sorted_values:
+        return 0.0
+    return round(sorted_values[nearest_rank_index(len(sorted_values), pct)], 2)
+
+
+def latency_zones(latencies: List[float]) -> Dict[str, int]:
+    zones = {"under_1ms": 0, "1_to_100ms": 0, "over_100ms": 0}
+    for ms in latencies:
+        if ms < FAST_PATH_MS:
+            zones["under_1ms"] += 1
+        elif ms <= COLANG_BUDGET_MS:
+            zones["1_to_100ms"] += 1
+        else:
+            zones["over_100ms"] += 1
+    return zones
 
 
 def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -59,7 +94,9 @@ def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not records:
         return _empty_summary()
     verdicts = Counter(r.get("verdict") for r in records)
+    paths = Counter(r.get("rail_path") for r in records)
     threats = Counter(r["threat_category"] for r in records if r.get("threat_category"))
+    latencies = sorted(float(r.get("latency_ms", 0.0)) for r in records)
     total = len(records)
     blocked = verdicts.get("INPUT_BLOCKED", 0)
     return {
@@ -68,8 +105,14 @@ def summarize_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "altered_requests": verdicts.get("OUTPUT_ALTERED", 0),
         "clean_requests": verdicts.get("ALLOWED", 0),
         "block_rate_pct": round(blocked / total * 100, 2),
-        "avg_latency_ms": round(sum(float(r.get("latency_ms", 0.0)) for r in records) / total, 2),
+        "avg_latency_ms": round(sum(latencies) / total, 2),
         "threat_distribution": dict(threats),
+        "fast_path_blocks": paths.get("FAST_PATH", 0),
+        "colang_blocks": paths.get("COLANG_INPUT", 0),
+        "sanitized_outputs": verdicts.get("OUTPUT_ALTERED", 0),
+        "p50_latency_ms": percentile(latencies, 50),
+        "p99_latency_ms": percentile(latencies, 99),
+        "latency_zones": latency_zones(latencies),
     }
 
 
@@ -115,6 +158,8 @@ class AuditStore:
         self._db = client[DB_NAME]
         await self._db[AUDIT_LOGS].create_index("timestamp")
         await self._db[AUDIT_LOGS].create_index("verdict")
+        # Percentiles sort by latency; the index keeps that off an in-memory sort.
+        await self._db[AUDIT_LOGS].create_index("latency_ms")
         _report(f"Connected to LIVE MongoDB at {safe_uri} ({source}), database '{DB_NAME}'.")
 
     async def close(self) -> None:
@@ -167,6 +212,10 @@ class AuditStore:
                                 "blocked": {"$sum": {"$cond": [{"$eq": ["$verdict", "INPUT_BLOCKED"]}, 1, 0]}},
                                 "altered": {"$sum": {"$cond": [{"$eq": ["$verdict", "OUTPUT_ALTERED"]}, 1, 0]}},
                                 "clean": {"$sum": {"$cond": [{"$eq": ["$verdict", "ALLOWED"]}, 1, 0]}},
+                                "fast_path": {"$sum": {"$cond": [{"$eq": ["$rail_path", "FAST_PATH"]}, 1, 0]}},
+                                "colang": {"$sum": {"$cond": [{"$eq": ["$rail_path", "COLANG_INPUT"]}, 1, 0]}},
+                                "under_1ms": {"$sum": {"$cond": [{"$lt": ["$latency_ms", FAST_PATH_MS]}, 1, 0]}},
+                                "over_100ms": {"$sum": {"$cond": [{"$gt": ["$latency_ms", COLANG_BUDGET_MS]}, 1, 0]}},
                                 "avg_latency": {"$avg": "$latency_ms"},
                             }
                         }
@@ -184,6 +233,7 @@ class AuditStore:
             return _empty_summary()
         t = facets["totals"][0]
         total = t["total"]
+        p50, p99 = await self._latency_percentiles(total)
         return {
             "total_requests": total,
             "blocked_requests": t["blocked"],
@@ -192,7 +242,33 @@ class AuditStore:
             "block_rate_pct": round(t["blocked"] / total * 100, 2),
             "avg_latency_ms": round(t["avg_latency"] or 0.0, 2),
             "threat_distribution": {d["_id"]: d["count"] for d in facets["threats"]},
+            "fast_path_blocks": t["fast_path"],
+            "colang_blocks": t["colang"],
+            "sanitized_outputs": t["altered"],
+            "p50_latency_ms": p50,
+            "p99_latency_ms": p99,
+            "latency_zones": {
+                "under_1ms": t["under_1ms"],
+                "1_to_100ms": total - t["under_1ms"] - t["over_100ms"],
+                "over_100ms": t["over_100ms"],
+            },
         }
+
+    async def _latency_percentiles(self, total: int) -> tuple:
+        """Nearest-rank p50/p99 via indexed sort + skip, without loading every record."""
+
+        async def at_rank(pct: float) -> float:
+            cursor = (
+                self._db[AUDIT_LOGS]
+                .find({}, {"_id": 0, "latency_ms": 1})
+                .sort("latency_ms", 1)
+                .skip(nearest_rank_index(total, pct))
+                .limit(1)
+            )
+            docs = await cursor.to_list(length=1)
+            return round(float(docs[0].get("latency_ms", 0.0)), 2) if docs else 0.0
+
+        return await at_rank(50), await at_rank(99)
 
     async def insert_telemetry_snapshot(self, snapshot: Dict[str, Any]) -> None:
         await self.connect()

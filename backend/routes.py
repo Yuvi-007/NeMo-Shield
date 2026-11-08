@@ -26,6 +26,7 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ChatTurn,
+    RailPath,
     SafetyVerdict,
     TelemetrySummary,
 )
@@ -209,7 +210,7 @@ async def _scan_conversation(turns: Sequence[ChatTurn]) -> Dict[str, Any]:
     return worst
 
 
-async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any]]:
+async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any], bool]:
     """Classify first; block high-confidence injections before NeMo runs.
 
     The classifier is the same ClassifyThreatAction the Colang input rail calls,
@@ -222,10 +223,14 @@ async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any]]
     Arabic harakat, Japanese dakuten, Cyrillic), so the rails and the LLM get
     the user's original text, NFC-normalized. Security is unchanged: anything
     the canonical form would block has already been blocked here.
+
+    Returns (reply, latency_ms, threat, fast_path), where fast_path is True
+    when the gateway blocked the turn without running the Colang runtime.
     """
     start = time.perf_counter()
     threat = await _scan_conversation(turns)
-    if threat["rail_action"] == "BLOCKED":
+    fast_path = threat["rail_action"] == "BLOCKED"
+    if fast_path:
         reply = BLOCK_MESSAGE
     else:
         latest = unicodedata.normalize("NFC", turns[-1].content)
@@ -236,7 +241,7 @@ async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any]]
         # leaves the gateway even if the Colang output rail misses it.
         reply = await mask_sensitive_entities(await _run_guarded(latest, history))
     latency_ms = (time.perf_counter() - start) * 1000
-    return reply, latency_ms, threat
+    return reply, latency_ms, threat, fast_path
 
 
 async def _run_unguarded(prompt: str) -> Tuple[str, float]:
@@ -261,6 +266,15 @@ def _classify_reply(reply: str, threat: Dict[str, Any]) -> Tuple[SafetyVerdict, 
     return SafetyVerdict.ALLOWED, category, threat["confidence"]
 
 
+def _rail_path(verdict: SafetyVerdict, fast_path: bool) -> RailPath:
+    """Name the layer that decided the request, for the telemetry rail breakdown."""
+    if verdict == SafetyVerdict.INPUT_BLOCKED:
+        return RailPath.FAST_PATH if fast_path else RailPath.COLANG_INPUT
+    if verdict == SafetyVerdict.OUTPUT_ALTERED:
+        return RailPath.COLANG_OUTPUT
+    return RailPath.PASSTHROUGH
+
+
 @router.get("/health")
 async def health() -> Dict[str, Any]:
     return {"status": "healthy", "service": "NeMo-Shield", "rails_active": True}
@@ -283,7 +297,7 @@ async def guard_chat(
     request: ChatRequest, http_request: Request, background_tasks: BackgroundTasks
 ) -> ChatResponse:
     turns = request.turns
-    reply, latency_ms, threat = await _guard(turns)
+    reply, latency_ms, threat, fast_path = await _guard(turns)
     verdict, category, confidence = _classify_reply(reply, threat)
     response = ChatResponse(
         reply=reply,
@@ -291,6 +305,7 @@ async def guard_chat(
         threat_category=category,
         confidence=round(confidence, 4),
         latency_ms=round(latency_ms, 2),
+        rail_path=_rail_path(verdict, fast_path),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
     entry = AuditLogEntry(
@@ -303,6 +318,7 @@ async def guard_chat(
         threat_category=response.threat_category,
         confidence=response.confidence,
         latency_ms=response.latency_ms,
+        rail_path=response.rail_path,
         client_ip=get_client_ip(http_request),
         session_id=request.session_id,
     )
@@ -340,7 +356,7 @@ async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
 )
 async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
     unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
-    guarded_reply, guarded_ms, threat = await _guard([ChatTurn(role="user", content=request.prompt)])
+    guarded_reply, guarded_ms, threat, _ = await _guard([ChatTurn(role="user", content=request.prompt)])
     verdict, _, _ = _classify_reply(guarded_reply, threat)
     return ABTestResponse(
         unguarded_reply=unguarded_reply,

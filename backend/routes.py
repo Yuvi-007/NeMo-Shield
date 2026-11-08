@@ -9,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
@@ -68,13 +68,30 @@ RATE_LIMIT_DETAIL = f"Rate limit exceeded: max {RATE_LIMIT_MAX_REQUESTS} request
 class SlidingWindowRateLimiter:
     """In-memory, per-IP sliding-window limiter (single process only)."""
 
-    def __init__(self, max_requests: int, window_seconds: float) -> None:
+    def __init__(
+        self, max_requests: int, window_seconds: float, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self._clock = clock
         self._hits: Dict[str, Deque[float]] = defaultdict(deque)
+        self._last_sweep = clock()
+
+    def _sweep(self, now: float) -> None:
+        """Drop keys with no hits inside the window, at most once per window."""
+        if now - self._last_sweep < self.window_seconds:
+            return
+        self._last_sweep = now
+        idle = [k for k, hits in self._hits.items() if not hits or now - hits[-1] >= self.window_seconds]
+        for key in idle:
+            del self._hits[key]
+
+    def tracked_keys(self) -> int:
+        return len(self._hits)
 
     def allow(self, key: str) -> bool:
-        now = time.monotonic()
+        now = self._clock()
+        self._sweep(now)
         hits = self._hits[key]
         while hits and now - hits[0] >= self.window_seconds:
             hits.popleft()
@@ -85,6 +102,7 @@ class SlidingWindowRateLimiter:
 
     def reset(self) -> None:
         self._hits.clear()
+        self._last_sweep = self._clock()
 
 
 rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
@@ -94,14 +112,30 @@ def behind_trusted_proxy() -> bool:
     return os.getenv("BEHIND_TRUSTED_PROXY") == "1"
 
 
+def trusted_proxy_hops() -> int:
+    """Number of proxies we control in front of the app (TRUSTED_PROXY_HOPS, default 1)."""
+    try:
+        hops = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+    except ValueError:
+        return 1
+    return hops if hops >= 1 else 1
+
+
 def get_client_ip(request: Request) -> str:
-    """Use X-Forwarded-For only when a trusted proxy sets it; it is spoofable otherwise."""
-    if behind_trusted_proxy():
-        forwarded = request.headers.get("x-forwarded-for", "")
-        first_hop = forwarded.split(",")[0].strip()
-        if first_hop:
-            return first_hop
-    return request.client.host if request.client else "unknown"
+    """Resolve the client IP, trusting X-Forwarded-For only behind our own proxies.
+
+    Each proxy appends the address it saw, so only the rightmost entries are
+    written by infrastructure we trust. Anything to the left is client-supplied
+    and spoofable. With N trusted proxies, the client IP is the Nth from the right.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if not behind_trusted_proxy():
+        return peer
+    entries = [e.strip() for e in request.headers.get("x-forwarded-for", "").split(",") if e.strip()]
+    hops = trusted_proxy_hops()
+    if len(entries) < hops:
+        return peer
+    return entries[-hops]
 
 
 async def enforce_rate_limit(request: Request) -> None:
@@ -223,7 +257,7 @@ async def guard_chat(
 @router.get(
     "/audit/logs",
     response_model=List[AuditLogEntry],
-    dependencies=[Depends(verify_admin_key)],
+    dependencies=[Depends(enforce_rate_limit), Depends(verify_admin_key)],
 )
 async def get_audit_logs(
     limit: int = Query(50, ge=1, le=500),
@@ -237,7 +271,7 @@ async def get_audit_logs(
 
 
 @router.get(
-    "/telemetry", response_model=TelemetrySummary, dependencies=[Depends(verify_admin_key)]
+    "/telemetry", response_model=TelemetrySummary, dependencies=[Depends(enforce_rate_limit), Depends(verify_admin_key)]
 )
 async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
     summary = TelemetrySummary(**await audit_store.telemetry_summary())

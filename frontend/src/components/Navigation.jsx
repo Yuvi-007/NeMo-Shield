@@ -19,20 +19,31 @@ function ShieldMark() {
 }
 
 // Session-only admin key entry for /telemetry and /audit/logs. Never bundled.
+// Saved on Enter or blur, not per keystroke: each save triggers a refetch, and
+// partial keys would only produce 401s and burn the per-IP rate-limit budget.
 function AdminKeyField() {
   const [value, setValue] = useState(getAdminKey)
+  const saved = getAdminKey()
+
+  const save = () => {
+    setAdminKey(value)
+    setValue(getAdminKey())
+  }
 
   return (
     <label className="inline-flex items-center gap-1.5 text-slate-400">
       <span className="hidden sm:inline">Admin key</span>
+      {saved && value === saved && <span className="text-emerald-300" aria-hidden>●</span>}
       <input
         type="password"
         autoComplete="off"
         value={value}
-        onChange={(e) => {
-          setValue(e.target.value)
-          setAdminKey(e.target.value)
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') save()
         }}
+        title="Press Enter to apply"
         placeholder="X-Admin-Key"
         aria-label="Admin key"
         className="w-32 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200 placeholder:text-slate-600 focus:border-sky-300/60 focus:outline-none"

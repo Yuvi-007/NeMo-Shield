@@ -313,6 +313,29 @@ def test_admin_routes_reject_empty_or_legacy_default_key(client, monkeypatch, co
     assert response.status_code == 503
 
 
+def test_telemetry_accepts_key_loaded_from_quoted_dotenv(client, monkeypatch, tmp_path):
+    """The same path the app uses: python-dotenv parses a quoted .env value."""
+    from dotenv import dotenv_values
+
+    loaded_key = "RXdotenvLoadedKey_9f8e7d6c5b4a3210zyxwvutsrq"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f'ADMIN_API_KEY="{loaded_key}"\n', encoding="utf-8")
+    monkeypatch.setenv("ADMIN_API_KEY", dotenv_values(env_file)["ADMIN_API_KEY"])
+
+    assert client.get("/api/v1/telemetry", headers={"X-Admin-Key": loaded_key}).status_code == 200
+    # The quotes are .env syntax, not part of the key.
+    quoted = client.get("/api/v1/telemetry", headers={"X-Admin-Key": f'"{loaded_key}"'})
+    assert quoted.status_code == 401
+
+
+def test_admin_key_is_read_per_request_not_at_import(client, monkeypatch):
+    """Changing ADMIN_API_KEY after startup takes effect without a restart."""
+    monkeypatch.setenv("ADMIN_API_KEY", "rotated-key-after-startup-1234")
+    assert client.get("/api/v1/telemetry", headers=ADMIN_HEADERS).status_code == 401
+    rotated = client.get("/api/v1/telemetry", headers={"X-Admin-Key": "rotated-key-after-startup-1234"})
+    assert rotated.status_code == 200
+
+
 def test_legacy_default_key_is_rejected_when_real_key_configured(client):
     response = client.get("/api/v1/telemetry", headers={"X-Admin-Key": LEGACY_DEFAULT_KEY})
     assert response.status_code == 401

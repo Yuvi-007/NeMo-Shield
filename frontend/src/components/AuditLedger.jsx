@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { describeError, getAuditLogs } from '../services/api'
+import { describeError, getAuditLogs, onAdminKeyChange } from '../services/api'
 import VerdictChip from './VerdictChip'
 
 const FILTERS = [
@@ -69,6 +69,9 @@ export default function AuditLedger() {
   useEffect(() => {
     load(filter)
   }, [filter, load])
+
+  // Refetch as soon as an admin key is saved in the header.
+  useEffect(() => onAdminKeyChange(() => load(filter)), [filter, load])
 
   return (
     <div className="space-y-5">

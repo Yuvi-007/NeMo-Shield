@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { describeError, getTelemetry } from '../services/api'
+import { describeError, getTelemetry, onAdminKeyChange } from '../services/api'
 
 // OWASP Top 10 for LLM Applications (2025). `covered` marks categories an active rail reports on.
 const OWASP_TOP_10 = [
@@ -68,6 +68,9 @@ export default function Telemetry() {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // Refetch as soon as an admin key is saved in the header.
+  useEffect(() => onAdminKeyChange(refresh), [refresh])
 
   const total = data?.total_requests ?? 0
   const cleanPct = total ? (data.clean_requests / total) * 100 : 0

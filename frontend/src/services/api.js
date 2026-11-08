@@ -16,10 +16,28 @@ export function getAdminKey() {
   return sessionStorage.getItem(ADMIN_KEY_STORAGE) || ''
 }
 
-export function setAdminKey(key) {
+const ADMIN_KEY_EVENT = 'nemo-shield:admin-key'
+
+// Keys are often copied from .env, where they may be quoted (ADMIN_API_KEY="...").
+// The quotes are .env syntax, not part of the key, so drop one surrounding pair.
+export function normalizeAdminKey(key) {
   const trimmed = (key || '').trim()
-  if (trimmed) sessionStorage.setItem(ADMIN_KEY_STORAGE, trimmed)
+  const quoted = /^(["'])(.*)\1$/.exec(trimmed)
+  return (quoted ? quoted[2] : trimmed).trim()
+}
+
+export function setAdminKey(key) {
+  const normalized = normalizeAdminKey(key)
+  if (normalized === getAdminKey()) return
+  if (normalized) sessionStorage.setItem(ADMIN_KEY_STORAGE, normalized)
   else sessionStorage.removeItem(ADMIN_KEY_STORAGE)
+  window.dispatchEvent(new Event(ADMIN_KEY_EVENT))
+}
+
+// Lets admin views refetch as soon as a key is saved. Returns an unsubscribe function.
+export function onAdminKeyChange(callback) {
+  window.addEventListener(ADMIN_KEY_EVENT, callback)
+  return () => window.removeEventListener(ADMIN_KEY_EVENT, callback)
 }
 
 function adminHeaders() {

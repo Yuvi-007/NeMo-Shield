@@ -1,4 +1,3 @@
-import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { describeError, runABTest, sendChat } from '../services/api'
 import CopyButton from './CopyButton'
@@ -15,6 +14,21 @@ const MODES = [
 ]
 
 const HISTORY_SIZE = 24
+
+const VIEWS = [
+  {
+    id: 'single',
+    label: 'Single-Turn Compare',
+    blurb:
+      'Send one prompt through the gateway and see what the model would have said without NeMo rails, next to what actually reaches the user.',
+  },
+  {
+    id: 'thread',
+    label: 'Multi-Turn Thread',
+    blurb:
+      'Send sequential turns and watch each one pass, get redacted, or abort the flow as the gateway rescans the whole conversation.',
+  },
+]
 
 function LatencyBadge({ children }) {
   return (
@@ -75,7 +89,7 @@ export default function Playground() {
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
-  const [threadOpen, setThreadOpen] = useState(false)
+  const [view, setView] = useState('single')
 
   function record(chat) {
     setHistory((h) => [...h, { ms: chat.latency_ms, verdict: chat.verdict }].slice(-HISTORY_SIZE))
@@ -112,154 +126,164 @@ export default function Playground() {
 
   return (
     <div className="space-y-6">
-      <div className="max-w-2xl">
-        <h1 className="text-2xl font-semibold tracking-tight">Red-team playground</h1>
-        <p className="mt-1 text-sm text-fg-muted">
-          Send a prompt through the gateway and see what the model would have said without NeMo rails, next to what
-          actually reaches the user.
-        </p>
+      <div className="flex flex-wrap items-end gap-4">
+        <div className="mr-auto max-w-2xl">
+          <h1 className="text-2xl font-semibold tracking-tight">Red-team playground</h1>
+          <p className="mt-1 text-sm text-fg-muted">{VIEWS.find((v) => v.id === view).blurb}</p>
+        </div>
+        <div role="tablist" aria-label="Playground mode" className="inline-flex rounded-lg border border-line p-1">
+          {VIEWS.map((v) => (
+            <button
+              key={v.id}
+              id={`tab-${v.id}`}
+              type="button"
+              role="tab"
+              aria-selected={view === v.id}
+              aria-controls={`panel-${v.id}`}
+              tabIndex={view === v.id ? 0 : -1}
+              onClick={() => setView(v.id)}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+                const next = VIEWS[(VIEWS.findIndex((x) => x.id === view) + 1) % VIEWS.length].id
+                setView(next)
+                document.getElementById(`tab-${next}`)?.focus()
+              }}
+              className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                view === v.id ? 'bg-accent text-canvas shadow-sm' : 'text-fg-muted hover:text-fg-2'
+              }`}
+            >
+              {v.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="glass rounded-lg border border-line p-4">
-        <PresetChips onPick={setPrompt} />
+      {/* Both panels stay mounted (just hidden), so switching modes keeps a thread or result. */}
+      <div id="panel-single" role="tabpanel" aria-labelledby="tab-single" hidden={view !== 'single'} className="space-y-6">
+        <form onSubmit={handleSubmit} className="glass rounded-lg border border-line p-4">
+          <PresetChips onPick={setPrompt} />
 
-        <div className="mt-3">
-          <PromptBox
-            id="prompt"
-            label="Prompt"
-            value={prompt}
-            onChange={setPrompt}
-            onSubmit={handleSubmit}
-            placeholder="Type a prompt, or load one of the attacks above."
-            footer={
-              <>
-                <div role="radiogroup" aria-label="Run mode" className="inline-flex rounded-md border border-line p-0.5">
-                  {MODES.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={mode === m.id}
-                      onClick={() => setMode(m.id)}
-                      className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                        mode === m.id ? 'bg-muted text-fg' : 'text-fg-muted hover:text-fg-2'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="submit"
-                  disabled={loading || !prompt.trim()}
-                  className="ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-canvas transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-line-strong disabled:text-fg-muted"
-                >
-                  {loading ? 'Running…' : mode === 'compare' ? 'Run comparison' : 'Send prompt'}
-                </button>
-              </>
-            }
-          />
-        </div>
-      </form>
+          <div className="mt-3">
+            <PromptBox
+              id="prompt"
+              label="Prompt"
+              value={prompt}
+              onChange={setPrompt}
+              onSubmit={handleSubmit}
+              placeholder="Type a prompt, or load one of the attacks above."
+              footer={
+                <>
+                  <div role="radiogroup" aria-label="Run mode" className="inline-flex rounded-md border border-line p-0.5">
+                    {MODES.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={mode === m.id}
+                        onClick={() => setMode(m.id)}
+                        className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                          mode === m.id ? 'bg-muted text-fg' : 'text-fg-muted hover:text-fg-2'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={loading || !prompt.trim()}
+                    className="ml-auto rounded-md bg-accent px-4 py-2 text-sm font-semibold text-canvas transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-line-strong disabled:text-fg-muted"
+                  >
+                    {loading ? 'Running…' : mode === 'compare' ? 'Run comparison' : 'Send prompt'}
+                  </button>
+                </>
+              }
+            />
+          </div>
+        </form>
 
-      {error && (
-        <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger-fg">
-          {error}
-        </p>
-      )}
-
-      {history.length > 0 && <LatencyGauge history={history} />}
-
-      {!result && !error && (
-        <p className="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-fg-subtle">
-          Results appear here. Try the prompt injection attack first to see the input rail stop it before the model runs.
-        </p>
-      )}
-
-      {result && (
-        <div aria-live="polite" className="space-y-3">
-          <p className="truncate text-xs text-fg-subtle">
-            Prompt: <span className="font-mono text-fg-muted">{result.prompt}</span>
+        {error && (
+          <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger-fg">
+            {error}
           </p>
+        )}
 
-          {result.mode === 'compare' ? (
-            <div className="grid gap-4 lg:grid-cols-[1fr_auto_1fr]">
-              <OutputPanel
-                title="Raw LLM"
-                subtitle="Same model, no rails"
-                verdict="UNGUARDED"
-                tone="raw"
-                latency={<LatencyBadge>baseline</LatencyBadge>}
-                reply={ab.unguarded_reply}
-              />
-              <RailDivider verdict={chat.verdict} />
+        {!result && !error && (
+          <p className="rounded-lg border border-dashed border-line px-4 py-10 text-center text-sm text-fg-subtle">
+            Results appear here. Try the prompt injection attack first to see the input rail stop it before the model runs.
+          </p>
+        )}
+
+        {result && (
+          <div aria-live="polite" className="space-y-3">
+            <p className="truncate text-xs text-fg-subtle">
+              Prompt: <span className="font-mono text-fg-muted">{result.prompt}</span>
+            </p>
+
+            {result.mode === 'compare' ? (
+              <div className="grid gap-4 lg:grid-cols-[1fr_auto_1fr]">
+                <OutputPanel
+                  title="Raw LLM"
+                  subtitle="Same model, no rails"
+                  verdict="UNGUARDED"
+                  tone="raw"
+                  latency={<LatencyBadge>baseline</LatencyBadge>}
+                  reply={ab.unguarded_reply}
+                />
+                <RailDivider verdict={chat.verdict} />
+                <OutputPanel
+                  title="NeMo-guarded"
+                  subtitle={subtitle}
+                  verdict={chat.verdict}
+                  railPath={chat.rail_path}
+                  tone={chat.verdict}
+                  latency={
+                    <>
+                      <LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>
+                      <LatencyBadge>
+                        {ab.latency_delta_ms >= 0 ? '+' : ''}
+                        {ab.latency_delta_ms.toFixed(1)} ms vs raw
+                      </LatencyBadge>
+                    </>
+                  }
+                  reply={chat.reply}
+                  copyText={() => JSON.stringify(chat, null, 2)}
+                />
+              </div>
+            ) : (
               <OutputPanel
                 title="NeMo-guarded"
                 subtitle={subtitle}
                 verdict={chat.verdict}
                 railPath={chat.rail_path}
                 tone={chat.verdict}
-                latency={
-                  <>
-                    <LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>
-                    <LatencyBadge>
-                      {ab.latency_delta_ms >= 0 ? '+' : ''}
-                      {ab.latency_delta_ms.toFixed(1)} ms vs raw
-                    </LatencyBadge>
-                  </>
-                }
+                latency={<LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>}
                 reply={chat.reply}
                 copyText={() => JSON.stringify(chat, null, 2)}
               />
-            </div>
-          ) : (
-            <OutputPanel
-              title="NeMo-guarded"
-              subtitle={subtitle}
-              verdict={chat.verdict}
-              railPath={chat.rail_path}
-              tone={chat.verdict}
-              latency={<LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>}
-              reply={chat.reply}
-              copyText={() => JSON.stringify(chat, null, 2)}
-            />
-          )}
+            )}
 
-          <p className="text-xs text-fg-subtle">
-            {result.mode === 'compare' &&
-              (ab.intervened ? 'The rails changed this response. ' : 'The rails let this response through unchanged. ')}
-            Classifier confidence {(chat.confidence * 100).toFixed(0)}%. This request is recorded in the audit ledger.
-          </p>
-        </div>
-      )}
+            <p className="text-xs text-fg-subtle">
+              {result.mode === 'compare' &&
+                (ab.intervened ? 'The rails changed this response. ' : 'The rails let this response through unchanged. ')}
+              Classifier confidence {(chat.confidence * 100).toFixed(0)}%. This request is recorded in the audit ledger.
+            </p>
+          </div>
+        )}
+      </div>
 
-      <section className="glass rounded-lg border border-line">
-        <h2>
-          <button
-            type="button"
-            aria-expanded={threadOpen}
-            aria-controls="threat-thread"
-            onClick={() => setThreadOpen((open) => !open)}
-            className="flex w-full items-center gap-3 px-4 py-3 text-left"
-          >
-            <span className="mr-auto">
-              <span className="block text-base font-semibold">Multi-turn threat thread</span>
-              <span className="block text-xs font-normal text-fg-muted">
-                Send sequential turns and watch each one pass, get redacted, or abort the flow as the gateway rescans the
-                whole conversation.
-              </span>
-            </span>
-            <ChevronDown
-              className={`size-4 shrink-0 text-fg-muted transition-transform ${threadOpen ? 'rotate-180' : ''}`}
-              aria-hidden
-            />
-          </button>
-        </h2>
-        {/* Hidden rather than unmounted, so collapsing keeps the conversation. */}
-        <div id="threat-thread" hidden={!threadOpen} className="border-t border-line p-4">
-          <ThreatThread onResult={record} />
-        </div>
+      <section
+        id="panel-thread"
+        role="tabpanel"
+        aria-labelledby="tab-thread"
+        hidden={view !== 'thread'}
+        className="glass rounded-lg border border-line p-4"
+      >
+        <ThreatThread onResult={record} />
       </section>
+
+      {/* Shared by both modes: every guarded response lands on the same session gauge. */}
+      {history.length > 0 && <LatencyGauge history={history} />}
     </div>
   )
 }

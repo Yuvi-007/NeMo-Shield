@@ -55,3 +55,6 @@ coverage.xml
 Thumbs.db
 
 .claude/
+
+# Node
+node_modules/

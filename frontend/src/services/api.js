@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { normalizeTelemetry } from '../lib/telemetry'
 
 // Base URL comes from VITE_API_BASE_URL at build time. Without it the console
 // calls the same origin at /api/v1: the Vite dev server proxies that path to
@@ -172,8 +173,10 @@ export async function runABTest(prompt) {
 
 export async function getTelemetry() {
   const data = await adminGet('/telemetry')
-  requireShape(data, '/telemetry', { total_requests: 'number' })
-  return data
+  // A non-object body (an HTML page, a bare string) is a contract break worth
+  // reporting; a wrong-typed field inside a real summary is coerced instead.
+  requireShape(data, '/telemetry', {})
+  return normalizeTelemetry(data)
 }
 
 export async function getAuditLogs(limit = 50, skip = 0, verdict = null) {

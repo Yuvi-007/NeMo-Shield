@@ -16,18 +16,81 @@ from nemoguardrails.types import ChatMessage, Role
 # PII / secret masking (output rail)
 # ---------------------------------------------------------------------------
 
-# Order matters: API keys first so their digits are never read as card numbers.
-# Boundaries must match the detectors in config/rails/output_rails.co exactly:
-# anything the rail detects has to be masked here, or it ships unredacted.
+# Order matters:
+#   - tokens and keys first, so their digits are never read as cards or phones;
+#   - quoted passwords before unquoted ones;
+#   - 19-digit cards before 16-digit ones (a 16-digit match would split a 19);
+#   - phones before SSNs, credentials-in-URLs before emails.
+# Every rule must stay linear: each match can only start at a fixed literal
+# (`AKIA`, `eyJ`, `+`, "password"...) or at the start of a run, enforced by a
+# look-behind, and every repeat is bounded or over a class the next token
+# cannot also match. tests/test_api.py runs each rule on 100k-char inputs.
+# The Colang output rail (config/rails/output_rails.co) only detects the
+# original card/email/sk- shapes; the gateway applies this full list to every
+# reply after the rails run, so the newer types are masked either way.
 # (`\b` is wrong here: it misses glued forms like "card4111..." and "_sk-...".)
 _MASKING_RULES = [
-    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
+    # Bearer tokens keep the scheme word: "Bearer [REDACTED_TOKEN]".
+    # The look-ahead needs a digit or symbol, so prose like "Bearer authentication" stays.
+    (
+        re.compile(r"(?i)(?<![A-Za-z0-9])(bearer[ \t]{1,10})(?=[A-Za-z]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}"),
+        r"\1[REDACTED_TOKEN]",
+    ),
+    # Bare JWTs: three base64url segments, the first starting with '{"' (eyJ).
+    (
+        re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+"),
+        "[REDACTED_TOKEN]",
+    ),
+    # Vendor API keys.
+    (re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])"), "[REDACTED_KEY]"),  # AWS
+    (re.compile(r"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36,255}"), "[REDACTED_KEY]"),  # GitHub
+    (re.compile(r"(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{22,255}"), "[REDACTED_KEY]"),  # GitHub fine-grained
+    (re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"), "[REDACTED_KEY]"),  # Google
+    (re.compile(r"(?<![A-Za-z0-9])nvapi-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),  # NVIDIA
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),  # OpenAI-style
+    # user:password@ in connection strings (mongodb+srv://, postgres://, ...).
+    (
+        re.compile(r"(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{1,20}://)[^\s:/@]{1,256}:[^\s/@]{1,256}@"),
+        r"\1[REDACTED_CREDENTIALS]@",
+    ),
+    # Password literals keep the field name: `"password": "[REDACTED_PASSWORD]"`.
+    (
+        re.compile(
+            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(["'])[^"'\r\n]{1,256}\2"""
+        ),
+        r"\1\2[REDACTED_PASSWORD]\2",
+    ),
+    (
+        re.compile(
+            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(?!["'\[])[^\s"',;]{1,256}"""
+        ),
+        r"\1[REDACTED_PASSWORD]",
+    ),
+    # Payment cards: 19-digit, 16-digit (4-4-4-4), Amex 15-digit (4-6-5).
+    (re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{3}(?!\d)"), "[REDACTED_CC]"),
     (re.compile(r"(?<!\d)\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)"), "[REDACTED_CC]"),
+    (re.compile(r"(?<!\d)3[47]\d{2}[- ]?\d{6}[- ]?\d{5}(?!\d)"), "[REDACTED_CC]"),
+    # E.164 phone numbers: "+", country code, 8-15 digits total, spaces or hyphens allowed.
+    (re.compile(r"(?<![\w+])\+[1-9](?:[ -]?\d){7,14}(?!\d)"), "[REDACTED_PHONE]"),
+    # US SSNs, hyphenated form only (bare 9-digit runs are too ambiguous).
+    (re.compile(r"(?<![\d-])\d{3}-\d{2}-\d{4}(?![\d-])"), "[REDACTED_SSN]"),
     # The look-behind lets a match start only at the beginning of a run of
     # local-part characters. Without it, a long run with no "@" (digits, "aaaa",
     # "sk-sk-...") is rescanned from every position: quadratic, ~12 s on 100k chars.
     (re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
 ]
+
+# Every token the masker can emit. A reply containing any of them was altered.
+REDACTION_TOKENS = (
+    "[REDACTED_TOKEN]",
+    "[REDACTED_KEY]",
+    "[REDACTED_CREDENTIALS]",
+    "[REDACTED_PASSWORD]",
+    "[REDACTED_CC]",
+    "[REDACTED_PHONE]",
+    "[REDACTED_SSN]",
+    "[REDACTED_EMAIL]",
+)
 
 
 @action(name="MaskSensitiveEntitiesAction")
@@ -35,7 +98,7 @@ async def mask_sensitive_entities(
     text: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Redact credit cards, API keys and emails from a bot response.
+    """Redact secrets and PII (see _MASKING_RULES) from a bot response or prompt.
 
     The Colang output rail passes the response as `text`. If it is omitted,
     the action falls back to `context["bot_message"]`.

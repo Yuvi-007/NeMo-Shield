@@ -43,7 +43,6 @@ BLOCK_MESSAGE = (
     "Request blocked by NeMo-Shield Input Rail: "
     "Malicious prompt injection pattern detected (OWASP LLM01)."
 )
-REDACTION_TOKENS = ("[REDACTED_EMAIL]", "[REDACTED_CC]", "[REDACTED_KEY]")
 PII_CATEGORY = "PII_LEAKAGE"
 UNGUARDED_SYSTEM_PROMPT = "You are a helpful assistant."
 
@@ -59,6 +58,8 @@ def _load_actions_module():
 _actions = _load_actions_module()
 classify_threat = _actions.classify_threat
 mask_sensitive_entities = _actions.mask_sensitive_entities
+# Single source of truth: every token the masker can emit marks a reply as altered.
+REDACTION_TOKENS = _actions.REDACTION_TOKENS
 OWASP_LLM01 = _actions.OWASP_LLM01
 HISTORY_CONTEXT_KEY = _actions.HISTORY_CONTEXT_KEY
 

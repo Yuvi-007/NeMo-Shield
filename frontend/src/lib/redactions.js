@@ -1,5 +1,5 @@
 // Redaction tokens written by the gateway's masker (config/actions.py
-// _MASKING_RULES and backend/routes.py REDACTION_TOKENS). Keep in sync.
+// _MASKING_RULES and REDACTION_TOKENS). Keep in sync.
 
 export const REDACTION_TYPES = {
   EMAIL: {
@@ -12,14 +12,39 @@ export const REDACTION_TYPES = {
     removed: 'secret key',
     pill: 'bg-danger/10 text-danger-fg ring-danger/30',
   },
+  TOKEN: {
+    label: 'Bearer token / JWT',
+    removed: 'auth token',
+    pill: 'bg-danger/10 text-danger-fg ring-danger/30',
+  },
+  PASSWORD: {
+    label: 'Password',
+    removed: 'password',
+    pill: 'bg-danger/10 text-danger-fg ring-danger/30',
+  },
+  CREDENTIALS: {
+    label: 'Connection credentials',
+    removed: 'user:password',
+    pill: 'bg-danger/10 text-danger-fg ring-danger/30',
+  },
   CC: {
     label: 'Card number',
     removed: 'card number',
     pill: 'bg-warn/10 text-warn-fg ring-warn/30',
   },
+  PHONE: {
+    label: 'Phone number',
+    removed: 'phone number',
+    pill: 'bg-ok/10 text-ok-fg ring-ok/30',
+  },
+  SSN: {
+    label: 'SSN',
+    removed: 'social security number',
+    pill: 'bg-warn/10 text-warn-fg ring-warn/30',
+  },
 }
 
-const TOKEN = /\[REDACTED_(EMAIL|KEY|CC)\]/g
+const TOKEN = /\[REDACTED_(EMAIL|KEY|TOKEN|PASSWORD|CREDENTIALS|CC|PHONE|SSN)\]/g
 
 /** Splits text into plain runs and redaction tokens: [{ text } | { token, type }]. */
 export function splitRedactions(text = '') {

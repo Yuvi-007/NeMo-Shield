@@ -601,6 +601,25 @@ REDOS_INPUTS = {
     "repeated sk- prefix": "sk-" * (REDOS_N // 3),
     "digit run": "1" * REDOS_N,
     "spaced digits": "1 " * (REDOS_N // 2),
+    # Widened masker rules (vendor keys, tokens, passwords, cards, phones, SSNs).
+    "repeated AKIA": "AKIA" * (REDOS_N // 4),
+    "repeated ghp_": "ghp_" * (REDOS_N // 4),
+    "repeated nvapi-": "nvapi-" * (REDOS_N // 6),
+    "repeated AIza": "AIza" * (REDOS_N // 4),
+    "repeated eyJ.": "eyJ." * (REDOS_N // 4),
+    "JWT head, no dots": "eyJ" + "a" * REDOS_N,
+    "JWT two segments": "eyJaaaaa." + "a" * REDOS_N,
+    "repeated bearer": "bearer " * (REDOS_N // 7),
+    "bearer, letters only": "Bearer " + "a" * REDOS_N,
+    "repeated password=": "password=" * (REDOS_N // 9),
+    "password, quote never closed": 'password: "' + "a" * REDOS_N,
+    "repeated +1": "+1" * (REDOS_N // 2),
+    "plus, spaced digits": "+" + "1 " * (REDOS_N // 2),
+    "repeated SSN prefix": "123-45-" * (REDOS_N // 7),
+    "hyphenated digit pairs": "12-" * (REDOS_N // 3),
+    "repeated scheme": "a://" * (REDOS_N // 4),
+    "URI user, no @": "a://b:" + "c" * REDOS_N,
+    "repeated amex prefix": "3782 " * (REDOS_N // 5),
 }
 
 
@@ -1032,3 +1051,154 @@ def test_split_turn_preset_passes_alone_then_blocks_in_thread(client):
     body = client.post(CHAT_URL, json={"messages": thread}).json()
     assert body["verdict"] == "INPUT_BLOCKED"
     assert body["rail_path"] == "FAST_PATH"
+
+
+# ---------------------------------------------------------------------------
+# Widened PII / secret redaction: vendor keys, tokens, passwords, connection
+# strings, more card shapes, phones and SSNs. Every value is masked before the
+# audit write and in the reply.
+# ---------------------------------------------------------------------------
+
+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+GITHUB_TOKEN = "ghp_" + "a1B2c3D4e5" * 3 + "f6G7h8"  # 36 chars after the prefix
+GOOGLE_KEY = "AIzaSyA-abcdefghijklmnopqrstuvwxyz12345"  # 35 chars after AIza
+NVIDIA_KEY = "nvapi-" + "Zx9_" * 10
+JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXZhbHVl"
+
+MASKING_CASES = [
+    pytest.param(f"aws {AWS_KEY} end", "aws [REDACTED_KEY] end", id="AWS access key"),
+    pytest.param("temp ASIAY34FZKBOKMUTVV7A", "temp [REDACTED_KEY]", id="AWS session key"),
+    pytest.param(f"token {GITHUB_TOKEN}", "token [REDACTED_KEY]", id="GitHub ghp_"),
+    pytest.param("gho_" + "x" * 36, "[REDACTED_KEY]", id="GitHub gho_"),
+    pytest.param("github_pat_" + "A1b2C3d4E5" * 3, "[REDACTED_KEY]", id="GitHub fine-grained PAT"),
+    pytest.param(f"key={GOOGLE_KEY}", "key=[REDACTED_KEY]", id="Google API key"),
+    pytest.param(f"NVIDIA_API_KEY {NVIDIA_KEY}", "NVIDIA_API_KEY [REDACTED_KEY]", id="NVIDIA API key"),
+    pytest.param(
+        f"Authorization: Bearer {JWT}", "Authorization: Bearer [REDACTED_TOKEN]", id="Bearer JWT"
+    ),
+    pytest.param("authorization: bearer abc.def-123_xyz", "authorization: bearer [REDACTED_TOKEN]", id="bearer opaque"),
+    pytest.param(f"cookie session={JWT};", "cookie session=[REDACTED_TOKEN];", id="bare JWT"),
+    pytest.param("password=hunter2", "password=[REDACTED_PASSWORD]", id="password="),
+    pytest.param("PWD: s3cr3t!", "PWD: [REDACTED_PASSWORD]", id="PWD: (case-insensitive)"),
+    pytest.param("db_password=Tr0ub4dor&3 next", "db_password=[REDACTED_PASSWORD] next", id="db_password="),
+    pytest.param(
+        '{"password": "correct horse battery"}', '{"password": "[REDACTED_PASSWORD]"}', id="JSON password"
+    ),
+    pytest.param("passwd='x y z'", "passwd='[REDACTED_PASSWORD]'", id="single-quoted passwd"),
+    pytest.param(
+        "mongodb+srv://admin:S3cret@cluster0.x.mongodb.net/db",
+        "mongodb+srv://[REDACTED_CREDENTIALS]@cluster0.x.mongodb.net/db",
+        id="connection string credentials",
+    ),
+    pytest.param("amex 3782 822463 10005", "amex [REDACTED_CC]", id="Amex spaced"),
+    pytest.param("378282246310005", "[REDACTED_CC]", id="Amex compact"),
+    pytest.param("card 4111111111111111111.", "card [REDACTED_CC].", id="19-digit card"),
+    pytest.param("6011-0009-9013-9424-123", "[REDACTED_CC]", id="19-digit card hyphenated"),
+    pytest.param("call +91 98765 43210 today", "call [REDACTED_PHONE] today", id="E.164 India spaced"),
+    pytest.param("+14155552671", "[REDACTED_PHONE]", id="E.164 US compact"),
+    pytest.param("+44-20-7946-0958", "[REDACTED_PHONE]", id="E.164 UK hyphenated"),
+    pytest.param("ssn 123-45-6789.", "ssn [REDACTED_SSN].", id="US SSN"),
+    pytest.param(
+        f"password={AWS_KEY}", "password=[REDACTED_KEY]", id="password holding a key keeps one token"
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), MASKING_CASES)
+def test_widened_masker_redacts_each_entity_type(text, expected):
+    from backend.routes import mask_sensitive_entities
+
+    assert asyncio.run(mask_sensitive_entities(text)) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Version 1.2.3 shipped on 2024-01-15",
+        "call extension 555-1234",
+        "order #12345678 and ISBN 978-3-16-148410-0",
+        "The password reset link was sent",
+        "Use Bearer authentication for the API",
+        "score +5 points, then 9 + 10 = 19",
+        "AKIA is the prefix AWS uses",
+        "visit https://example.com/docs",
+        "the eyJ prefix marks base64 JSON",
+    ],
+)
+def test_widened_masker_leaves_ordinary_text_alone(text):
+    from backend.routes import mask_sensitive_entities
+
+    assert asyncio.run(mask_sensitive_entities(text)) == text
+
+
+ALL_SECRETS = {
+    "aws": AWS_KEY,
+    "github": GITHUB_TOKEN,
+    "google": GOOGLE_KEY,
+    "nvidia": NVIDIA_KEY,
+    "jwt": JWT,
+    "password": "hunter2",
+    "uri": "admin:S3cret",
+    "amex": "3782 822463 10005",
+    "card19": "4111111111111111111",
+    "phone": "+91 98765 43210",
+    "ssn": "123-45-6789",
+}
+
+
+def _secret_prompt(tag):
+    s = ALL_SECRETS
+    return (
+        f"{tag}: aws {s['aws']}, gh {s['github']}, google {s['google']}, nv {s['nvidia']}, "
+        f"Authorization: Bearer {s['jwt']}, password={s['password']}, "
+        f"mongodb+srv://{s['uri']}@db.example.net, amex {s['amex']}, card {s['card19']}, "
+        f"phone {s['phone']}, ssn {s['ssn']}"
+    )
+
+
+def test_audit_store_never_receives_widened_secrets(client):
+    prompt = _secret_prompt("widened-audit-check")
+    assert client.post(CHAT_URL, json={"prompt": prompt}).status_code == 200
+
+    records = client.get("/api/v1/audit/logs", params={"limit": 500}, headers=ADMIN_HEADERS).json()
+    stored = [r["prompt"] for r in records if r["prompt"].startswith("widened-audit-check:")]
+    assert len(stored) == 1
+    for name, value in ALL_SECRETS.items():
+        assert value not in stored[0], f"{name} reached the audit store"
+    for token in ("[REDACTED_KEY]", "[REDACTED_TOKEN]", "[REDACTED_PASSWORD]", "[REDACTED_CREDENTIALS]",
+                  "[REDACTED_CC]", "[REDACTED_PHONE]", "[REDACTED_SSN]"):
+        assert token in stored[0]
+
+
+def test_reply_with_widened_secrets_is_redacted_and_flagged(client, monkeypatch):
+    """The Colang rail only detects the original three shapes; the gateway re-mask covers the rest."""
+    from mock_llm import MockLLM
+
+    monkeypatch.setattr(MockLLM, "_reply", lambda self, prompt: _secret_prompt("leaky-model"))
+    body = client.post(CHAT_URL, json={"prompt": "Summarize the CAP theorem"}).json()
+    assert body["verdict"] == "OUTPUT_ALTERED"
+    assert body["threat_category"] == "PII_LEAKAGE"
+    for name, value in ALL_SECRETS.items():
+        assert value not in body["reply"], f"{name} reached the client"
+
+
+def test_console_recognizes_every_redaction_token():
+    """The Audit Ledger's PII inspector must know every token the masker emits."""
+    from backend.routes import REDACTION_TOKENS
+
+    source = (Path(__file__).resolve().parent.parent / "frontend" / "src" / "lib" / "redactions.js").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"\\\[REDACTED_\(([A-Z|]+)\)\\\]", source)
+    assert match, "token regex not found in frontend/src/lib/redactions.js"
+    console_tokens = {f"[REDACTED_{name}]" for name in match.group(1).split("|")}
+    assert console_tokens == set(REDACTION_TOKENS)
+
+
+@pytest.mark.parametrize("token", ["[REDACTED_PHONE]", "[REDACTED_SSN]", "[REDACTED_TOKEN]"])
+def test_every_new_redaction_token_marks_the_reply_altered(token):
+    from backend.routes import REDACTION_TOKENS, _classify_reply
+
+    assert token in REDACTION_TOKENS
+    verdict, category, _ = _classify_reply(f"value {token}", {"rail_action": "ALLOWED", "confidence": 0.0})
+    assert verdict.value == "OUTPUT_ALTERED" and category == "PII_LEAKAGE"

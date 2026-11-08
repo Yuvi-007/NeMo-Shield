@@ -142,7 +142,7 @@ Status reflects the code at the current commit. **Partial** means the control ex
 |---|---|---|---|---|
 | **LLM01:2025** | Prompt Injection | Unicode canonicalization; 7-signal weighted classifier (block ≥ 0.70, flag ≥ 0.40); Colang L1 `search()` detectors; fixed refusal + `abort`, so no model tokens are spent | `backend/security.py::canonicalize_text`, `routes.py::_guard`, `config/rails/input_rails.co`, `config/actions.py::classify_threat` | **Partial.** Signature-based only. Paraphrased and role-play attacks with no trigger words pass (§7.1). |
 | LLM07:2025 | System Prompt Leakage | `system_prompt_extraction` signal; hardened system instruction in `config.yml` | Input rail | Partial (same limits as LLM01) |
-| **LLM02:2025** | Sensitive Information Disclosure | Output rail masks payment cards, emails, and `sk-` keys to `[REDACTED_*]`; masker boundaries match the Colang detectors (enforced by a test that parses `output_rails.co`); the gateway re-masks every reply; the audit prompt is masked before it is written to MongoDB | `config/rails/output_rails.co`, `actions.py::mask_sensitive_entities`, `routes.py::_guard`, `routes.py::guard_chat` | **Partial.** Three entity types only (§7.3). |
+| **LLM02:2025** | Sensitive Information Disclosure | Output rail masks payment cards, emails, and `sk-` keys to `[REDACTED_*]`; masker boundaries match the Colang detectors (enforced by a test that parses `output_rails.co`); the gateway re-masks every reply with the full masker (vendor keys, bearer tokens/JWTs, password literals, connection-string credentials, 15/16/19-digit cards, E.164 phones, SSNs, emails); the audit prompt is masked before it is written to MongoDB | `config/rails/output_rails.co`, `actions.py::mask_sensitive_entities`, `routes.py::_guard`, `routes.py::guard_chat` | **Partial.** Pattern-based; the Colang detectors still cover only the original three types (§7.3). |
 | — | Audit-data access control | `X-Admin-Key` checked with `hmac.compare_digest` on `/telemetry` and `/audit/logs`; fails closed (`503`) when `ADMIN_API_KEY` is unset, blank, or the legacy default; the console takes the key per session and never bundles it | `backend/security.py::verify_admin_key` | **Implemented.** Single shared key, no rotation or scoping (§7.4). |
 | **LLM04 (v1.1)** / LLM10:2025 | Model Denial of Service / Unbounded Consumption | 2,000-char input cap; 60 req/min per-IP sliding window on `/guard/*` and admin routes; client IP taken N hops from the right of `X-Forwarded-For`; idle IPs evicted; fast path keeps attack traffic off the Colang runtime and the model | `models.py::ChatRequest`, `routes.py::enforce_rate_limit`, `routes.py::get_client_ip` | **Partial.** Per-process state, so limits multiply across workers and replicas (§7.2). |
 
@@ -368,7 +368,7 @@ Other gaps in the same class: slow multi-turn escalation, where each turn and th
 
 ### 7.3 PII coverage
 
-- **Entity coverage.** Only emails, 16-digit cards, and `sk-` keys are covered. Not covered: 15-digit Amex, SSNs, phone numbers, AWS (`AKIA…`), GitHub (`ghp_…`), and Google (`AIza…`) keys, JWTs, and private-key blocks.
+- **Entity coverage.** The masker covers emails; 15-, 16- and 19-digit cards; `sk-`, AWS (`AKIA…`/`ASIA…`), GitHub (`ghp_…`, `github_pat_…`), Google (`AIza…`), and NVIDIA (`nvapi-…`) keys; bearer tokens and JWTs; `password`/`passwd`/`pwd` literals; `user:pass@` in connection strings; E.164 phones; and hyphenated SSNs. Every rule is tested on 100k-character adversarial input. Not covered: private-key blocks, unformatted national phone numbers, bare 9-digit SSNs, and secrets described in prose. The Colang output rail still detects only cards, emails, and `sk-` keys; the other types are masked by the gateway's re-mask of every reply.
 - **Audit masking runs on the raw prompt, not the canonical one.** `john​@example.com` (zero-width space before `@`) reaches MongoDB unmasked.
 - **Client IP is stored in the audit log.** It counts as personal data under GDPR. Hash it or set a retention policy.
 - **Streaming.** `ChatRequest.stream` is accepted but not implemented. A streaming path would need chunk-boundary-aware redaction.
@@ -386,7 +386,7 @@ Ordered by risk reduced per unit of work.
 
 | # | Change | Closes |
 |---|---|---|
-| 1 | Add Amex, SSN, AWS/GitHub/Google keys, and JWT to both the Colang detectors and the masker; mask the canonical prompt in the audit log | §7.3 |
+| 1 | Mirror the widened masker in the Colang output-rail detectors; mask the canonical prompt in the audit log | §7.3 |
 | 2 | Separate, stricter limiter bucket for failed admin auth; scoped, rotatable admin keys behind a server-side session | §7.2, §7.4 |
 | 3 | Run CI on the full suite (`pytest`), not just `tests/test_api.py`; add a red-team regression corpus with a tracked false-negative rate | — |
 | 4 | **Redis token bucket.** Atomic Lua `INCR` + `PEXPIRE` (or `redis-cell`) keyed by resolved IP and API key, shared across workers and replicas, so limits stay correct under horizontal scaling | §7.2 desync |

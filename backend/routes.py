@@ -6,6 +6,7 @@ import importlib.util
 import os
 import sys
 import time
+import unicodedata
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,16 +174,22 @@ async def _guard(prompt: str) -> Tuple[str, float, Dict[str, Any]]:
     so a BLOCKED score here is a verdict the rail would reach anyway. Skipping
     the Colang runtime for it saves ~100 ms. Everything else (benign, FLAGGED,
     and PII output checks) still goes through the full rails.
+
+    The canonical form is for detection only. It strips combining marks and
+    folds homoglyphs, which corrupts non-Latin scripts (Devanagari vowel signs,
+    Arabic harakat, Japanese dakuten, Cyrillic), so the rails and the LLM get
+    the user's original text, NFC-normalized. Security is unchanged: anything
+    the canonical form would block has already been blocked here.
     """
     start = time.perf_counter()
-    prompt = canonicalize_text(prompt)
-    threat = await classify_threat(prompt)
+    threat = await classify_threat(canonicalize_text(prompt))
     if threat["rail_action"] == "BLOCKED":
         reply = BLOCK_MESSAGE
     else:
+        original = unicodedata.normalize("NFC", prompt)
         # Defense in depth: re-mask whatever the rails return, so PII never
         # leaves the gateway even if the Colang output rail misses it.
-        reply = await mask_sensitive_entities(await _run_guarded(prompt))
+        reply = await mask_sensitive_entities(await _run_guarded(original))
     latency_ms = (time.perf_counter() - start) * 1000
     return reply, latency_ms, threat
 

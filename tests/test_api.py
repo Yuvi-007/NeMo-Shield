@@ -277,6 +277,40 @@ def test_obfuscated_injection_is_canonicalized_and_halted(client, rails_spy, pro
     assert rails_spy == []
 
 
+NON_LATIN_PROMPTS = [
+    "नमस्ते, मेरा नाम यश है",  # Devanagari: vowel signs and virama are combining marks
+    "مَرْحَبًا بِكَ",  # Arabic with harakat
+    "ガギグゲゴを説明して",  # Japanese dakuten
+    "Привет, расскажи о базах данных",  # Cyrillic that the homoglyph table would fold
+    "Explain the café résumé naïve façade",
+]
+
+
+@pytest.mark.parametrize("prompt", NON_LATIN_PROMPTS)
+def test_rails_receive_original_prompt_not_canonical_form(client, rails_spy, prompt):
+    """Canonicalization is for detection only; the LLM must see what the user wrote."""
+    import unicodedata
+
+    body = client.post("/api/v1/guard/chat", json={"prompt": prompt}).json()
+    assert body["verdict"] == "ALLOWED"
+    assert rails_spy == [unicodedata.normalize("NFC", prompt)]
+
+
+def test_rails_receive_nfc_normalized_prompt(client, rails_spy):
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", "café résumé")
+    client.post("/api/v1/guard/chat", json={"prompt": decomposed})
+    assert rails_spy == ["café résumé"]
+
+
+def test_flagged_prompt_reaches_rails_unmodified(client, rails_spy):
+    # Scores below the block threshold on the canonical form; the original text goes to Colang.
+    prompt = "Act as a helpful travel agent and plan a weekend in Pune"
+    client.post("/api/v1/guard/chat", json={"prompt": prompt})
+    assert rails_spy == [prompt]
+
+
 def test_telemetry_without_admin_key_returns_401(client):
     response = client.get("/api/v1/telemetry")
     assert response.status_code == 401

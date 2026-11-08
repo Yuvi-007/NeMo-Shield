@@ -6,12 +6,13 @@ import importlib.util
 import os
 import sys
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
@@ -53,9 +54,45 @@ def _load_actions_module():
 
 _actions = _load_actions_module()
 classify_threat = _actions.classify_threat
+mask_sensitive_entities = _actions.mask_sensitive_entities
 OWASP_LLM01 = _actions.OWASP_LLM01
 
 router = APIRouter(prefix="/api/v1")
+
+RATE_LIMIT_MAX_REQUESTS = 60
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+RATE_LIMIT_DETAIL = f"Rate limit exceeded: max {RATE_LIMIT_MAX_REQUESTS} requests/min"
+
+
+class SlidingWindowRateLimiter:
+    """In-memory, per-IP sliding-window limiter (single process only)."""
+
+    def __init__(self, max_requests: int, window_seconds: float) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._hits: Dict[str, Deque[float]] = defaultdict(deque)
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        hits = self._hits[key]
+        while hits and now - hits[0] >= self.window_seconds:
+            hits.popleft()
+        if len(hits) >= self.max_requests:
+            return False
+        hits.append(now)
+        return True
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+rate_limiter = SlidingWindowRateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
+
+
+async def enforce_rate_limit(request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limiter.allow(client_ip):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=RATE_LIMIT_DETAIL)
 
 _rails: Optional[LLMRails] = None
 _base_llm = MockLLM()
@@ -135,7 +172,9 @@ async def _record_telemetry_snapshot(summary: TelemetrySummary) -> None:
     await audit_store.insert_telemetry_snapshot(snapshot)
 
 
-@router.post("/guard/chat", response_model=ChatResponse)
+@router.post(
+    "/guard/chat", response_model=ChatResponse, dependencies=[Depends(enforce_rate_limit)]
+)
 async def guard_chat(
     request: ChatRequest, http_request: Request, background_tasks: BackgroundTasks
 ) -> ChatResponse:
@@ -152,7 +191,8 @@ async def guard_chat(
     entry = AuditLogEntry(
         id=uuid4().hex,
         timestamp=response.timestamp,
-        prompt=request.prompt,
+        # Never persist raw user PII to the audit store.
+        prompt=await mask_sensitive_entities(request.prompt),
         reply=response.reply,
         verdict=response.verdict,
         threat_category=response.threat_category,
@@ -183,7 +223,9 @@ async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
     return summary
 
 
-@router.post("/guard/ab-test", response_model=ABTestResponse)
+@router.post(
+    "/guard/ab-test", response_model=ABTestResponse, dependencies=[Depends(enforce_rate_limit)]
+)
 async def guard_ab_test(request: ABTestRequest) -> ABTestResponse:
     unguarded_reply, unguarded_ms = await _run_unguarded(request.prompt)
     guarded_reply, guarded_ms, threat = await _guard(request.prompt)

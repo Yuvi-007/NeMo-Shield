@@ -15,7 +15,7 @@ I built this to answer one practical question: how much of an LLM safety layer c
 | **Persistence** | MongoDB Atlas via `motor` (async), with an in-memory fallback |
 | **Console** | React 19 · Vite · Tailwind 4 (`frontend/`) · light / dark / system theme |
 | **Output contract** | Pydantic v2 JSON verdicts: `ALLOWED` / `INPUT_BLOCKED` / `OUTPUT_ALTERED` |
-| **Tests** | 120 pytest cases, no network, API key, or database required |
+| **Tests** | 243 pytest cases, no network, API key, or database required |
 
 ![NeMo-Shield Red Team Playground](docs/images/playground.png)
 
@@ -298,7 +298,7 @@ Screenshots: `docs/images/playground.png` (Red Team Playground) and `docs/images
 ### Tests
 
 ```bash
-pytest -v                       # 120 tests, ~9 s
+pytest -v                       # 243 tests, ~12 s
 pytest tests/test_api.py -v     # gateway only (what CI runs)
 python test_rails.py            # human-readable rail report with per-case latency
 ```

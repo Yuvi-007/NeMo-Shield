@@ -32,11 +32,13 @@ def client():
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
     """Give every test a fresh per-IP request budget."""
-    from backend.routes import rate_limiter
+    from backend.routes import admin_auth_failures, rate_limiter
 
     rate_limiter.reset()
+    admin_auth_failures.reset()
     yield
     rate_limiter.reset()
+    admin_auth_failures.reset()
 
 
 def test_health_returns_200(client):
@@ -486,14 +488,104 @@ def test_rate_limiter_evicts_idle_keys():
 
 
 def test_admin_key_guessing_is_rate_limited(client):
-    from backend.routes import RATE_LIMIT_MAX_REQUESTS
+    """Failed admin auth has its own, much smaller budget than general traffic."""
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES, RATE_LIMIT_MAX_REQUESTS
 
-    for i in range(RATE_LIMIT_MAX_REQUESTS):
+    assert ADMIN_AUTH_MAX_FAILURES < RATE_LIMIT_MAX_REQUESTS
+    for i in range(ADMIN_AUTH_MAX_FAILURES):
         response = client.get("/api/v1/telemetry", headers={"X-Admin-Key": f"guess-{i}"})
         assert response.status_code == 401
 
+    # Locked out: even the correct key is refused until the window passes.
     throttled = client.get("/api/v1/telemetry", headers=ADMIN_HEADERS)
     assert throttled.status_code == 429
+    assert "admin" in throttled.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Roadmap #2: a separate, stricter bucket for failed admin authentication.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_admin_key_counts_as_a_failed_attempt(client):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    for _ in range(ADMIN_AUTH_MAX_FAILURES):
+        assert client.get("/api/v1/audit/logs").status_code == 401
+    assert client.get("/api/v1/audit/logs", headers=ADMIN_HEADERS).status_code == 429
+
+
+def test_lockout_covers_every_admin_route(client):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    for i in range(ADMIN_AUTH_MAX_FAILURES):
+        client.get("/api/v1/telemetry", headers={"X-Admin-Key": f"guess-{i}"})
+    assert client.get("/api/v1/audit/logs", headers=ADMIN_HEADERS).status_code == 429
+
+
+def test_successful_admin_auth_never_counts_toward_lockout(client):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    for _ in range(ADMIN_AUTH_MAX_FAILURES * 4):
+        assert client.get("/api/v1/telemetry", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_unconfigured_admin_key_does_not_count_toward_lockout(client, monkeypatch):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    monkeypatch.delenv("ADMIN_API_KEY")
+    for _ in range(ADMIN_AUTH_MAX_FAILURES + 2):
+        assert client.get("/api/v1/telemetry", headers=ADMIN_HEADERS).status_code == 503
+    monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
+    assert client.get("/api/v1/telemetry", headers=ADMIN_HEADERS).status_code == 200
+
+
+def test_admin_lockout_is_per_client_ip(client, monkeypatch):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "1")
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+    attacker = {"X-Forwarded-For": "203.0.113.66"}
+    for i in range(ADMIN_AUTH_MAX_FAILURES):
+        client.get("/api/v1/telemetry", headers={**attacker, "X-Admin-Key": f"guess-{i}"})
+    assert client.get("/api/v1/telemetry", headers={**attacker, **ADMIN_HEADERS}).status_code == 429
+
+    operator = {"X-Forwarded-For": "198.51.100.20", **ADMIN_HEADERS}
+    assert client.get("/api/v1/telemetry", headers=operator).status_code == 200
+
+
+def test_admin_lockout_does_not_block_chat_traffic(client):
+    from backend.routes import ADMIN_AUTH_MAX_FAILURES
+
+    for i in range(ADMIN_AUTH_MAX_FAILURES):
+        client.get("/api/v1/telemetry", headers={"X-Admin-Key": f"guess-{i}"})
+    assert client.post(CHAT_URL, json={"prompt": "What is a B-tree?"}).status_code == 200
+
+
+def test_admin_lockout_expires_after_the_window():
+    from backend.routes import SlidingWindowRateLimiter
+
+    now = [0.0]
+    failures = SlidingWindowRateLimiter(3, 900.0, clock=lambda: now[0])
+    for _ in range(3):
+        failures.record("203.0.113.5")
+    assert failures.exhausted("203.0.113.5")
+    assert not failures.exhausted("203.0.113.6")
+
+    now[0] = 899.0
+    assert failures.exhausted("203.0.113.5")
+    now[0] = 900.0
+    assert not failures.exhausted("203.0.113.5")
+
+
+def test_exhausted_check_does_not_consume_budget():
+    from backend.routes import SlidingWindowRateLimiter
+
+    limiter = SlidingWindowRateLimiter(2, 60.0, clock=lambda: 0.0)
+    for _ in range(10):
+        assert not limiter.exhausted("10.0.0.1")
+    assert limiter.allow("10.0.0.1") and limiter.allow("10.0.0.1")
+    assert not limiter.allow("10.0.0.1")
 
 
 # ---------------------------------------------------------------------------

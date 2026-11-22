@@ -18,7 +18,7 @@ from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
 from backend.database import audit_store
-from backend.security import canonicalize_text, uncovered_language, verify_admin_key
+from backend.security import canonicalize_text, hash_client_ip, uncovered_language, verify_admin_key
 from backend.models import (
     ABTestRequest,
     ABTestResponse,
@@ -398,7 +398,7 @@ async def guard_chat(
         confidence=response.confidence,
         latency_ms=response.latency_ms,
         rail_path=response.rail_path,
-        client_ip=get_client_ip(http_request),
+        client_ip_hash=hash_client_ip(get_client_ip(http_request)),
         session_id=request.session_id,
         flags=response.flags,
     )

@@ -1676,3 +1676,146 @@ def test_flags_are_stored_on_the_audit_record(client):
 
 def test_plain_prompt_has_no_flags(client):
     assert client.post(CHAT_URL, json={"prompt": "What is a B-tree?"}).json()["flags"] == []
+
+
+# ---------------------------------------------------------------------------
+# Roadmap #8: audit records store a salted hash of the client IP, and expire
+# after AUDIT_RETENTION_DAYS through a MongoDB TTL index on a Date field.
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _audit_record(client, tag):
+    records = client.get("/api/v1/audit/logs", params={"limit": 500}, headers=ADMIN_HEADERS).json()
+    match = [r for r in records if tag in r["prompt"]]
+    assert len(match) == 1
+    return match[0]
+
+
+def test_audit_record_stores_hashed_ip_not_raw_ip(client, monkeypatch):
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "1")
+    tag = f"ip-hash-{uuid.uuid4().hex[:8]}"
+    client.post(CHAT_URL, json={"prompt": f"{tag} hello"}, headers={"X-Forwarded-For": "203.0.113.77"})
+    record = _audit_record(client, tag)
+    assert record["client_ip"] is None
+    assert re.fullmatch(r"[0-9a-f]{16}", record["client_ip_hash"])
+    assert "203.0.113.77" not in str(record)
+
+
+def test_same_ip_gets_same_hash_and_different_ips_differ(client, monkeypatch):
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "1")
+    hashes = {}
+    for ip, n in (("198.51.100.1", 1), ("198.51.100.1", 2), ("198.51.100.2", 3)):
+        tag = f"ip-stable-{uuid.uuid4().hex[:8]}"
+        client.post(CHAT_URL, json={"prompt": f"{tag} hi"}, headers={"X-Forwarded-For": ip})
+        hashes[n] = _audit_record(client, tag)["client_ip_hash"]
+    assert hashes[1] == hashes[2]
+    assert hashes[1] != hashes[3]
+
+
+def test_ip_hash_is_salted(monkeypatch):
+    from backend.security import hash_client_ip
+
+    monkeypatch.setenv("AUDIT_IP_SALT", "salt-one")
+    first = hash_client_ip("192.0.2.10")
+    monkeypatch.setenv("AUDIT_IP_SALT", "salt-two")
+    second = hash_client_ip("192.0.2.10")
+    assert first != second
+    # An unsalted digest could be reversed by hashing all 2^32 IPv4 addresses.
+    assert first not in hashlib.sha256(b"192.0.2.10").hexdigest()
+
+
+def test_ip_hash_without_configured_salt_still_hides_the_ip(monkeypatch):
+    from backend.security import hash_client_ip
+
+    monkeypatch.delenv("AUDIT_IP_SALT", raising=False)
+    digest = hash_client_ip("192.0.2.10")
+    assert re.fullmatch(r"[0-9a-f]{16}", digest)
+    assert digest == hash_client_ip("192.0.2.10")  # stable within the process
+    assert digest not in hashlib.sha256(b"192.0.2.10").hexdigest()
+
+
+@pytest.mark.parametrize(("value", "days"), [(None, 30), ("7", 7), ("365", 365), ("0", 30), ("-3", 30), ("abc", 30)])
+def test_audit_retention_days_parsing(monkeypatch, value, days):
+    from backend.database import audit_retention_seconds
+
+    if value is None:
+        monkeypatch.delenv("AUDIT_RETENTION_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("AUDIT_RETENTION_DAYS", value)
+    assert audit_retention_seconds() == days * 86400
+
+
+def test_memory_store_drops_records_past_retention(monkeypatch):
+    from backend.database import AuditStore
+
+    monkeypatch.setenv("NEMO_SHIELD_FORCE_MEMORY_DB", "1")
+    monkeypatch.setenv("AUDIT_RETENTION_DAYS", "30")
+    store = AuditStore()
+    now = datetime.now(timezone.utc)
+    old = {"id": "old", "timestamp": "2020-01-01T00:00:00+00:00", "verdict": "ALLOWED", "created_at": now - timedelta(days=31)}
+    fresh = {"id": "fresh", "timestamp": now.isoformat(), "verdict": "ALLOWED"}
+    asyncio.run(store.insert_audit_log(old))
+    asyncio.run(store.insert_audit_log(fresh))
+    assert [r["id"] for r in asyncio.run(store.find_audit_logs())] == ["fresh"]
+    assert asyncio.run(store.telemetry_summary())["total_requests"] == 1
+
+
+def test_stored_records_carry_a_date_but_the_api_hides_it(client):
+    from backend.database import AUDIT_LOGS, audit_store
+
+    tag = f"created-at-{uuid.uuid4().hex[:8]}"
+    client.post(CHAT_URL, json={"prompt": f"{tag} hi"})
+    raw = [r for r in audit_store._memory[AUDIT_LOGS] if tag in r["prompt"]]
+    assert isinstance(raw[0]["created_at"], datetime)
+    assert "created_at" not in _audit_record(client, tag)
+
+
+class _FakeCollection:
+    def __init__(self, conflict=False):
+        self.indexes = []
+        self.conflict = conflict
+
+    async def create_index(self, key, **kwargs):
+        if self.conflict and kwargs.get("expireAfterSeconds") is not None:
+            from pymongo.errors import OperationFailure
+
+            raise OperationFailure("IndexOptionsConflict", code=85)
+        self.indexes.append((key, kwargs))
+
+
+class _FakeDb(dict):
+    def __init__(self, conflict=False):
+        super().__init__()
+        self.conflict = conflict
+        self.commands = []
+
+    def __missing__(self, name):
+        self[name] = _FakeCollection(self.conflict)
+        return self[name]
+
+    async def command(self, *args, **kwargs):
+        self.commands.append((args, kwargs))
+
+
+def test_mongo_ttl_index_expires_audit_and_telemetry_records(monkeypatch):
+    from backend.database import AUDIT_LOGS, TELEMETRY_SNAPSHOTS, AuditStore
+
+    monkeypatch.setenv("AUDIT_RETENTION_DAYS", "14")
+    db = _FakeDb()
+    asyncio.run(AuditStore()._ensure_indexes(db))
+    for name in (AUDIT_LOGS, TELEMETRY_SNAPSHOTS):
+        ttl = [kw for key, kw in db[name].indexes if key == "created_at"]
+        assert ttl == [{"expireAfterSeconds": 14 * 86400}], name
+
+
+def test_changed_retention_updates_existing_ttl_index(monkeypatch):
+    from backend.database import AUDIT_LOGS, AuditStore
+
+    monkeypatch.setenv("AUDIT_RETENTION_DAYS", "7")
+    db = _FakeDb(conflict=True)
+    asyncio.run(AuditStore()._ensure_indexes(db))
+    coll_mods = [args[0] for args, _ in db.commands if args and args[0].get("collMod") == AUDIT_LOGS]
+    assert coll_mods and coll_mods[0]["index"] == {"keyPattern": {"created_at": 1}, "expireAfterSeconds": 7 * 86400}

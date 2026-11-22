@@ -122,7 +122,10 @@ class AuditLogEntry(BaseModel):
     latency_ms: float
     # None on records written before rail attribution existed.
     rail_path: Optional[RailPath] = None
+    # Raw IPs are no longer stored; only on records written before hashing existed.
     client_ip: Optional[str] = None
+    # HMAC-SHA256 of the client IP with AUDIT_IP_SALT, first 16 hex characters.
+    client_ip_hash: Optional[str] = None
     session_id: Optional[str] = None
     # Empty on records written before flags existed.
     flags: List[RequestFlag] = Field(default_factory=list)

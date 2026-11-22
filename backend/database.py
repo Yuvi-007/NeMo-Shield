@@ -11,6 +11,7 @@ import logging
 import math
 import os
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -29,8 +30,41 @@ COLANG_BUDGET_MS = 100.0
 
 try:
     from motor.motor_asyncio import AsyncIOMotorClient
+    from pymongo.errors import OperationFailure
 except ImportError:  # pragma: no cover - motor is listed in requirements.txt
     AsyncIOMotorClient = None  # type: ignore[assignment]
+    OperationFailure = Exception  # type: ignore[assignment,misc]
+
+# Retention. `timestamp` is an ISO string for the API, and MongoDB TTL indexes
+# only expire BSON Date fields, so each stored document also gets `created_at`
+# (a Date, never returned by the API) and the TTL index sits on that.
+# Documents written before this field existed have no `created_at` and are
+# never expired by the index.
+CREATED_AT = "created_at"
+DEFAULT_RETENTION_DAYS = 30
+# Mongo error codes when an index exists with different options.
+_INDEX_OPTIONS_CONFLICT = {85, 86}
+
+
+def audit_retention_seconds() -> int:
+    """AUDIT_RETENTION_DAYS (default 30) in seconds; invalid or < 1 means the default."""
+    try:
+        days = int(os.getenv("AUDIT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS))
+    except ValueError:
+        days = DEFAULT_RETENTION_DAYS
+    if days < 1:
+        days = DEFAULT_RETENTION_DAYS
+    return days * 86400
+
+
+def _with_created_at(doc: Dict[str, Any]) -> Dict[str, Any]:
+    stored = dict(doc)
+    stored.setdefault(CREATED_AT, datetime.now(timezone.utc))
+    return stored
+
+
+def _without_created_at(doc: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in doc.items() if k != CREATED_AT}
 
 
 def _redact_uri(uri: str) -> str:
@@ -156,11 +190,32 @@ class AuditStore:
             return
         self._client = client
         self._db = client[DB_NAME]
-        await self._db[AUDIT_LOGS].create_index("timestamp")
-        await self._db[AUDIT_LOGS].create_index("verdict")
-        # Percentiles sort by latency; the index keeps that off an in-memory sort.
-        await self._db[AUDIT_LOGS].create_index("latency_ms")
+        await self._ensure_indexes(self._db)
         _report(f"Connected to LIVE MongoDB at {safe_uri} ({source}), database '{DB_NAME}'.")
+
+    async def _ensure_indexes(self, db: Any) -> None:
+        await db[AUDIT_LOGS].create_index("timestamp")
+        await db[AUDIT_LOGS].create_index("verdict")
+        # Percentiles sort by latency; the index keeps that off an in-memory sort.
+        await db[AUDIT_LOGS].create_index("latency_ms")
+        ttl = audit_retention_seconds()
+        for name in (AUDIT_LOGS, TELEMETRY_SNAPSHOTS):
+            try:
+                await db[name].create_index(CREATED_AT, expireAfterSeconds=ttl)
+            except OperationFailure as exc:
+                if getattr(exc, "code", None) not in _INDEX_OPTIONS_CONFLICT:
+                    raise
+                # The index exists with an older retention; update it in place.
+                await db.command(
+                    {"collMod": name, "index": {"keyPattern": {CREATED_AT: 1}, "expireAfterSeconds": ttl}}
+                )
+
+    def _prune_memory(self, name: str) -> List[Dict[str, Any]]:
+        """Apply the retention window to the in-memory fallback, like the TTL index."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=audit_retention_seconds())
+        kept = [r for r in self._memory[name] if r[CREATED_AT] >= cutoff]
+        self._memory[name] = kept
+        return kept
 
     async def close(self) -> None:
         if self._client is not None:
@@ -173,11 +228,11 @@ class AuditStore:
         await self.connect()
         if self._db is not None:
             try:
-                await self._db[AUDIT_LOGS].insert_one(dict(entry))
+                await self._db[AUDIT_LOGS].insert_one(_with_created_at(entry))
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to write audit log to MongoDB (%s); kept in memory.", exc)
-        self._memory[AUDIT_LOGS].append(dict(entry))
+        self._memory[AUDIT_LOGS].append(_with_created_at(entry))
 
     async def find_audit_logs(
         self, limit: int = 50, skip: int = 0, verdict: Optional[str] = None
@@ -187,20 +242,21 @@ class AuditStore:
         if self._db is not None:
             cursor = (
                 self._db[AUDIT_LOGS]
-                .find(query, {"_id": 0})
+                .find(query, {"_id": 0, CREATED_AT: 0})
                 .sort("timestamp", -1)
                 .skip(skip)
                 .limit(limit)
             )
             return await cursor.to_list(length=limit)
-        records = [r for r in self._memory[AUDIT_LOGS] if not verdict or r.get("verdict") == verdict]
+        live = self._prune_memory(AUDIT_LOGS)
+        records = [_without_created_at(r) for r in live if not verdict or r.get("verdict") == verdict]
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return records[skip : skip + limit]
 
     async def telemetry_summary(self) -> Dict[str, Any]:
         await self.connect()
         if self._db is None:
-            return summarize_records(self._memory[AUDIT_LOGS])
+            return summarize_records(self._prune_memory(AUDIT_LOGS))
         pipeline = [
             {
                 "$facet": {
@@ -274,11 +330,12 @@ class AuditStore:
         await self.connect()
         if self._db is not None:
             try:
-                await self._db[TELEMETRY_SNAPSHOTS].insert_one(dict(snapshot))
+                await self._db[TELEMETRY_SNAPSHOTS].insert_one(_with_created_at(snapshot))
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to write telemetry snapshot to MongoDB (%s).", exc)
-        self._memory[TELEMETRY_SNAPSHOTS].append(dict(snapshot))
+        self._memory[TELEMETRY_SNAPSHOTS].append(_with_created_at(snapshot))
+        self._prune_memory(TELEMETRY_SNAPSHOTS)
 
 
 audit_store = AuditStore()

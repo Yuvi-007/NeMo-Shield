@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 from backend.database import audit_store  # noqa: E402
 from backend.routes import behind_trusted_proxy, get_rails, router  # noqa: E402
-from backend.security import configured_admin_key  # noqa: E402
+from backend.security import configured_admin_key, ip_salt_configured  # noqa: E402
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -64,6 +64,12 @@ async def lifespan(app: FastAPI):
         print(
             "[NeMo-Shield] WARNING: ADMIN_API_KEY is unset or uses the legacy default; "
             "/telemetry and /audit/logs will return 503.",
+            flush=True,
+        )
+    if not ip_salt_configured():
+        print(
+            "[NeMo-Shield] WARNING: AUDIT_IP_SALT is unset; client IP hashes use a random "
+            "per-process salt and will not match across restarts.",
             flush=True,
         )
     await audit_store.connect()

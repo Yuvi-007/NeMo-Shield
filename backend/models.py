@@ -72,6 +72,18 @@ class RailPath(str, Enum):
     PASSTHROUGH = "PASSTHROUGH"
 
 
+class RequestFlag(str, Enum):
+    """Advisory signals that never change the verdict on their own.
+
+    ENCODED_PAYLOAD:    a base64/hex run decoded to text and was rescanned.
+    UNCOVERED_LANGUAGE: much of the text is in a script the English-only
+                        injection signatures don't cover.
+    """
+
+    ENCODED_PAYLOAD = "ENCODED_PAYLOAD"
+    UNCOVERED_LANGUAGE = "UNCOVERED_LANGUAGE"
+
+
 class ChatResponse(BaseModel):
     reply: str
     verdict: SafetyVerdict
@@ -79,6 +91,9 @@ class ChatResponse(BaseModel):
     confidence: float = 0.0
     latency_ms: float = 0.0
     rail_path: RailPath = RailPath.PASSTHROUGH
+    flags: List[RequestFlag] = Field(default_factory=list)
+    # Classifier signals behind the score, e.g. "base64:instruction_override".
+    matched_signals: List[str] = Field(default_factory=list)
     timestamp: str
 
 
@@ -109,8 +124,14 @@ class AuditLogEntry(BaseModel):
     latency_ms: float
     # None on records written before rail attribution existed.
     rail_path: Optional[RailPath] = None
+    # Raw IPs are no longer stored; only on records written before hashing existed.
     client_ip: Optional[str] = None
+    # HMAC-SHA256 of the client IP with AUDIT_IP_SALT, first 16 hex characters.
+    client_ip_hash: Optional[str] = None
     session_id: Optional[str] = None
+    # Empty on records written before flags existed.
+    flags: List[RequestFlag] = Field(default_factory=list)
+    matched_signals: List[str] = Field(default_factory=list)
 
 
 class TelemetrySummary(BaseModel):

@@ -5,6 +5,7 @@ import LatencyGauge from './LatencyGauge'
 import PresetChips from './PresetChips'
 import PromptBox from './PromptBox'
 import RailPathBadge from './RailPathBadge'
+import { FlagBadges, SignalChips } from './ThreatSignals'
 import ThreatThread from './ThreatThread'
 import VerdictChip from './VerdictChip'
 
@@ -36,7 +37,7 @@ function LatencyBadge({ children }) {
   )
 }
 
-function OutputPanel({ title, subtitle, verdict, railPath, latency, reply, tone, copyText }) {
+function OutputPanel({ title, subtitle, verdict, railPath, flags, latency, reply, tone, copyText }) {
   const edge = {
     raw: 'border-line',
     ALLOWED: 'border-ok/40',
@@ -50,6 +51,11 @@ function OutputPanel({ title, subtitle, verdict, railPath, latency, reply, tone,
         <div className="mr-auto">
           <h3 className="text-sm font-semibold text-fg">{title}</h3>
           <p className="text-xs text-fg-subtle">{subtitle}</p>
+          {flags?.length > 0 && (
+            <div className="mt-1.5">
+              <FlagBadges flags={flags} />
+            </div>
+          )}
         </div>
         {latency}
         <RailPathBadge path={railPath} />
@@ -236,6 +242,7 @@ export default function Playground() {
                   subtitle={subtitle}
                   verdict={chat.verdict}
                   railPath={chat.rail_path}
+                  flags={chat.flags}
                   tone={chat.verdict}
                   latency={
                     <>
@@ -256,6 +263,7 @@ export default function Playground() {
                 subtitle={subtitle}
                 verdict={chat.verdict}
                 railPath={chat.rail_path}
+                flags={chat.flags}
                 tone={chat.verdict}
                 latency={<LatencyBadge>{chat.latency_ms.toFixed(1)} ms</LatencyBadge>}
                 reply={chat.reply}
@@ -263,6 +271,12 @@ export default function Playground() {
               />
             )}
 
+            {chat.matched_signals?.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
+                <span>Signals matched:</span>
+                <SignalChips signals={chat.matched_signals} />
+              </div>
+            )}
             <p className="text-xs text-fg-subtle">
               {result.mode === 'compare' &&
                 (ab.intervened ? 'The rails changed this response. ' : 'The rails let this response through unchanged. ')}

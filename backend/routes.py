@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
 from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
 from backend.database import audit_store
-from backend.security import canonicalize_text, verify_admin_key
+from backend.security import canonicalize_text, hash_client_ip, uncovered_language, verify_admin_key
 from backend.models import (
     ABTestRequest,
     ABTestResponse,
@@ -27,6 +27,7 @@ from backend.models import (
     ChatResponse,
     ChatTurn,
     RailPath,
+    RequestFlag,
     SafetyVerdict,
     TelemetrySummary,
 )
@@ -94,16 +95,33 @@ class SlidingWindowRateLimiter:
     def tracked_keys(self) -> int:
         return len(self._hits)
 
-    def allow(self, key: str) -> bool:
-        now = self._clock()
+    def _live_hits(self, key: str, now: float) -> Deque[float]:
         self._sweep(now)
         hits = self._hits[key]
         while hits and now - hits[0] >= self.window_seconds:
             hits.popleft()
+        return hits
+
+    def allow(self, key: str) -> bool:
+        """Count a hit and return True, or return False if the budget is spent."""
+        now = self._clock()
+        hits = self._live_hits(key, now)
         if len(hits) >= self.max_requests:
             return False
         hits.append(now)
         return True
+
+    def exhausted(self, key: str) -> bool:
+        """True if the key's budget is spent. Does not count a hit."""
+        now = self._clock()
+        if key not in self._hits:
+            return False
+        return len(self._live_hits(key, now)) >= self.max_requests
+
+    def record(self, key: str) -> None:
+        """Count a hit unconditionally (used to tally failures)."""
+        now = self._clock()
+        self._live_hits(key, now).append(now)
 
     def reset(self) -> None:
         self._hits.clear()
@@ -147,6 +165,32 @@ async def enforce_rate_limit(request: Request) -> None:
     client_ip = get_client_ip(request)
     if not rate_limiter.allow(client_ip):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=RATE_LIMIT_DETAIL)
+
+
+# Failed admin auth gets its own, much smaller budget than general traffic:
+# 5 wrong or missing keys in 15 minutes locks the IP out of every admin route,
+# even with the right key, until the oldest failure leaves the window.
+ADMIN_AUTH_MAX_FAILURES = 5
+ADMIN_AUTH_WINDOW_SECONDS = 900.0
+ADMIN_LOCKOUT_DETAIL = "Too many failed admin authentication attempts; try again later"
+admin_auth_failures = SlidingWindowRateLimiter(ADMIN_AUTH_MAX_FAILURES, ADMIN_AUTH_WINDOW_SECONDS)
+
+
+async def require_admin(request: Request, x_admin_key: Optional[str] = Header(None)) -> None:
+    """Check X-Admin-Key, tallying 401s per client IP toward a lockout.
+
+    A 503 (no key configured on the server) is not the client's fault and is
+    not counted. Successful requests never count.
+    """
+    client_ip = get_client_ip(request)
+    if admin_auth_failures.exhausted(client_ip):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ADMIN_LOCKOUT_DETAIL)
+    try:
+        verify_admin_key(x_admin_key)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            admin_auth_failures.record(client_ip)
+        raise
 
 _rails: Optional[LLMRails] = None
 # The /guard/ab-test baseline. Deliberately always the offline mock: see guard_ab_test.
@@ -203,13 +247,29 @@ async def _scan_conversation(turns: Sequence[ChatTurn]) -> Dict[str, Any]:
     texts = [" ".join(turn.content for turn in turns if turn.role == "user")]
     texts += [turn.content for turn in turns[:-1] if turn.role == "assistant"]
     worst = latest
+    decoded = latest.get("decoded_payloads", 0)
     for text in texts:
         result = await classify_threat(canonicalize_text(text))
+        decoded += result.get("decoded_payloads", 0)
         if result["confidence"] > worst["confidence"]:
             worst = result
         if worst["rail_action"] == "BLOCKED":
             break
-    return worst
+    return {**worst, "decoded_payloads": decoded}
+
+
+def _request_flags(turns: Sequence[ChatTurn], threat: Dict[str, Any]) -> List[RequestFlag]:
+    """Advisory flags; they never change the verdict.
+
+    The language check reads the original text of every turn, since all of
+    it reaches the model, and canonical folding would hide Cyrillic/Greek.
+    """
+    flags: List[RequestFlag] = []
+    if threat.get("decoded_payloads"):
+        flags.append(RequestFlag.ENCODED_PAYLOAD)
+    if uncovered_language(" ".join(turn.content for turn in turns)):
+        flags.append(RequestFlag.UNCOVERED_LANGUAGE)
+    return flags
 
 
 async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any], bool]:
@@ -282,6 +342,22 @@ async def health() -> Dict[str, Any]:
     return {"status": "healthy", "service": "NeMo-Shield", "rails_active": True}
 
 
+async def mask_for_audit(text: str) -> str:
+    """Mask PII in a prompt before it is persisted.
+
+    Obfuscation (zero-width characters, fullwidth letters, letter-spacing) can
+    hide PII from the masker. If the canonical form of the masked prompt still
+    contains PII, the masked canonical form is stored instead. Clean prompts,
+    including non-Latin ones, are stored as written, because canonicalization
+    would garble them.
+    """
+    masked = await mask_sensitive_entities(text)
+    canonical = canonicalize_text(masked)
+    if await mask_sensitive_entities(canonical) == canonical:
+        return masked
+    return await mask_sensitive_entities(canonicalize_text(text))
+
+
 async def _record_audit_log(entry: AuditLogEntry) -> None:
     await audit_store.insert_audit_log(entry.model_dump(mode="json"))
 
@@ -308,21 +384,25 @@ async def guard_chat(
         confidence=round(confidence, 4),
         latency_ms=round(latency_ms, 2),
         rail_path=_rail_path(verdict, fast_path),
+        flags=_request_flags(turns, threat),
+        matched_signals=list(threat.get("matched_signals", [])),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
     entry = AuditLogEntry(
         id=uuid4().hex,
         timestamp=response.timestamp,
         # Never persist raw user PII to the audit store.
-        prompt=await mask_sensitive_entities(turns[-1].content),
+        prompt=await mask_for_audit(turns[-1].content),
         reply=response.reply,
         verdict=response.verdict,
         threat_category=response.threat_category,
         confidence=response.confidence,
         latency_ms=response.latency_ms,
         rail_path=response.rail_path,
-        client_ip=get_client_ip(http_request),
+        client_ip_hash=hash_client_ip(get_client_ip(http_request)),
         session_id=request.session_id,
+        flags=response.flags,
+        matched_signals=response.matched_signals,
     )
     background_tasks.add_task(_record_audit_log, entry)
     return response
@@ -331,7 +411,7 @@ async def guard_chat(
 @router.get(
     "/audit/logs",
     response_model=List[AuditLogEntry],
-    dependencies=[Depends(enforce_rate_limit), Depends(verify_admin_key)],
+    dependencies=[Depends(enforce_rate_limit), Depends(require_admin)],
 )
 async def get_audit_logs(
     limit: int = Query(50, ge=1, le=500),
@@ -345,7 +425,7 @@ async def get_audit_logs(
 
 
 @router.get(
-    "/telemetry", response_model=TelemetrySummary, dependencies=[Depends(enforce_rate_limit), Depends(verify_admin_key)]
+    "/telemetry", response_model=TelemetrySummary, dependencies=[Depends(enforce_rate_limit), Depends(require_admin)]
 )
 async def get_telemetry(background_tasks: BackgroundTasks) -> TelemetrySummary:
     summary = TelemetrySummary(**await audit_store.telemetry_summary())

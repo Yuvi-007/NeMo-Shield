@@ -57,6 +57,7 @@ const KEY_STATES = {
   rejected: { dot: 'text-danger-fg', ring: 'border-danger/70', text: 'Admin key rejected (401)' },
   missing: { dot: 'text-warn-fg', ring: 'border-warn/70', text: 'Admin key required (401)' },
   unconfigured: { dot: 'text-warn-fg', ring: 'border-line-strong', text: 'Admin API disabled on the backend (503)' },
+  locked: { dot: 'text-danger-fg', ring: 'border-danger/70', text: 'Admin access locked after repeated failed keys (429)' },
 }
 
 function AdminKeyField() {

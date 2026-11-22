@@ -6,8 +6,11 @@ calls actions by their registered names (which must end in "Action").
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
-from typing import Any, Dict, List, Optional
+from itertools import chain, islice
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from nemoguardrails.actions import action
 from nemoguardrails.types import ChatMessage, Role
@@ -25,9 +28,9 @@ from nemoguardrails.types import ChatMessage, Role
 # (`AKIA`, `eyJ`, `+`, "password"...) or at the start of a run, enforced by a
 # look-behind, and every repeat is bounded or over a class the next token
 # cannot also match. tests/test_api.py runs each rule on 100k-char inputs.
-# The Colang output rail (config/rails/output_rails.co) only detects the
-# original card/email/sk- shapes; the gateway applies this full list to every
-# reply after the rails run, so the newer types are masked either way.
+# config/rails/output_rails.co has one search() detector per rule with the
+# identical regex (tests/test_api.py enforces it), so the Colang rail and the
+# gateway re-mask agree on what counts as sensitive.
 # (`\b` is wrong here: it misses glued forms like "card4111..." and "_sk-...".)
 _MASKING_RULES = [
     # Bearer tokens keep the scheme word: "Bearer [REDACTED_TOKEN]".
@@ -54,15 +57,21 @@ _MASKING_RULES = [
         r"\1[REDACTED_CREDENTIALS]@",
     ),
     # Password literals keep the field name: `"password": "[REDACTED_PASSWORD]"`.
+    # Quotes are spelled \x22 / \x27 and the closing quote is the named group
+    # (?P=q) because these regexes are copied verbatim into output_rails.co: a
+    # raw quote would end the Colang string, and "\2" would be read as an octal
+    # escape. (?!\[REDACTED_) stops an already-masked value from matching again.
     (
         re.compile(
-            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(["'])[^"'\r\n]{1,256}\2"""
+            r"(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{0,5}[:=][ \t]{0,5})"
+            r"(?P<q>[\x22\x27])(?!\[REDACTED_)[^\x22\x27\r\n]{1,256}(?P=q)"
         ),
-        r"\1\2[REDACTED_PASSWORD]\2",
+        r"\1\g<q>[REDACTED_PASSWORD]\g<q>",
     ),
     (
         re.compile(
-            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(?!["'\[])[^\s"',;]{1,256}"""
+            r"(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{0,5}[:=][ \t]{0,5})"
+            r"(?![\x22\x27\[])[^\s\x22\x27,;]{1,256}"
         ),
         r"\1[REDACTED_PASSWORD]",
     ),
@@ -165,23 +174,111 @@ _THREAT_SIGNALS = [
 ]
 _COMPILED_SIGNALS = [(name, re.compile(rx, re.IGNORECASE), w) for name, rx, w in _THREAT_SIGNALS]
 
+# ---------------------------------------------------------------------------
+# Encoded payloads: decode base64 / hex runs and rescan the plain text.
+# ---------------------------------------------------------------------------
+
+# Look-behinds let a match start only at the beginning of a run, so each
+# pattern is linear. Hex characters are a subset of base64, so a hex run is
+# tried both ways; the wrong decoding fails the text check and is dropped.
+_BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{16,}={0,2}")
+_HEX_RUN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){8,}(?![0-9A-Fa-f])")
+_ESCAPED_HEX_RUN = re.compile(r"(?:\\x[0-9A-Fa-f]{2}){8,}")
+
+MAX_DECODE_DEPTH = 2  # e.g. base64 wrapping hex
+MAX_DECODE_CANDIDATES = 16  # per text, per level
+MAX_ENCODED_CHARS = 8192  # longer runs are truncated before decoding
+
+
+def _printable(raw: bytes) -> Optional[str]:
+    """Return the decoded string if it is valid, almost all printable UTF-8.
+
+    Keys, hashes, and random tokens decode to binary and are dropped here.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if len(text) < 6:
+        return None
+    printable = sum(ch.isprintable() or ch in "\t\r\n" for ch in text)
+    return text if printable >= 0.95 * len(text) else None
+
+
+def _reads_as_text(text: str) -> bool:
+    """At least 40% letters: prose, not another encoded layer or a number."""
+    return sum(ch.isalpha() for ch in text) >= 0.4 * len(text)
+
+
+def _decode_base64(run: str) -> Optional[bytes]:
+    run = run.rstrip("=").replace("-", "+").replace("_", "/")
+    run = run[: MAX_ENCODED_CHARS - MAX_ENCODED_CHARS % 4]
+    if len(run) % 4 == 1:
+        run = run[:-1]
+    try:
+        return base64.b64decode(run + "=" * (-len(run) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _decode_hex(run: str) -> Optional[bytes]:
+    run = run.replace("\\x", "")[: MAX_ENCODED_CHARS - MAX_ENCODED_CHARS % 2]
+    try:
+        return bytes.fromhex(run)
+    except ValueError:
+        return None
+
+
+def _decoded_payloads(text: str, depth: int = MAX_DECODE_DEPTH) -> List[Tuple[str, str]]:
+    """Return (label, plain text) for every encoded run that decodes to text.
+
+    Any printable layer is decoded again (a hex string inside base64 is mostly
+    digits, so it is not "text" itself), but only layers that read as text are
+    returned. Nested encodings get joined labels, e.g. "base64:hex".
+    """
+    if depth <= 0 or not text:
+        return []
+    candidates: Iterator[Tuple[str, Optional[bytes]]] = chain(
+        (("hex", _decode_hex(m.group())) for m in _ESCAPED_HEX_RUN.finditer(text)),
+        (("hex", _decode_hex(m.group())) for m in _HEX_RUN.finditer(text)),
+        (("base64", _decode_base64(m.group())) for m in _BASE64_RUN.finditer(text)),
+    )
+    found: List[Tuple[str, str]] = []
+    for label, raw in islice(candidates, MAX_DECODE_CANDIDATES):
+        decoded = _printable(raw) if raw else None
+        if decoded is None:
+            continue
+        if _reads_as_text(decoded):
+            found.append((label, decoded))
+        found.extend((f"{label}:{inner}", plain) for inner, plain in _decoded_payloads(decoded, depth - 1))
+    return found
+
 
 @action(name="ClassifyThreatAction")
 async def classify_threat(prompt: str) -> Dict[str, Any]:
     """Score a prompt for OWASP LLM01 prompt-injection signals.
+
+    Base64 and hex runs that decode to text are rescanned with the same
+    signals; a match is reported as e.g. "base64:instruction_override" and
+    carries the same weight as the plain signal.
 
     Returns:
         owasp_tag: OWASP category, or "NONE" when no signal matched.
         confidence: combined score in [0, 1].
         rail_action: "BLOCKED" (>= 0.70), "FLAGGED" (>= 0.40) or "ALLOWED".
         matched_signals: names of the signals that matched.
+        decoded_payloads: how many encoded runs decoded to text and were rescanned.
     """
+    prompt = prompt or ""
+    payloads = _decoded_payloads(prompt)
     matched: List[str] = []
     clean_probability = 1.0
-    for name, pattern, weight in _COMPILED_SIGNALS:
-        if pattern.search(prompt or ""):
-            matched.append(name)
-            clean_probability *= 1.0 - weight
+    for label, text in [("", prompt)] + payloads:
+        for name, pattern, weight in _COMPILED_SIGNALS:
+            signal = f"{label}:{name}" if label else name
+            if signal not in matched and pattern.search(text):
+                matched.append(signal)
+                clean_probability *= 1.0 - weight
 
     confidence = round(1.0 - clean_probability, 4)
     if confidence >= BLOCK_THRESHOLD:
@@ -196,6 +293,7 @@ async def classify_threat(prompt: str) -> Dict[str, Any]:
         "confidence": confidence,
         "rail_action": rail_action,
         "matched_signals": matched,
+        "decoded_payloads": len(payloads),
     }
 
 

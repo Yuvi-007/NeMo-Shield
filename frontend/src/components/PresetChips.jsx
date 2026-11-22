@@ -1,4 +1,4 @@
-import { ATTACKS, MULTILINGUAL_ATTACKS } from './presets'
+import { ATTACKS, ENCODED_ATTACKS, MULTILINGUAL_ATTACKS } from './presets'
 
 const CHIP =
   'rounded-full border border-line-strong px-3 py-1 text-xs text-fg-3 transition-colors hover:border-danger/50 hover:text-danger-fg disabled:opacity-50'
@@ -30,6 +30,22 @@ export default function PresetChips({ onPick, disabled = false, showEnglish = tr
           >
             <span lang={attack.lang}>{attack.label}</span>
             <span className="ml-1.5 font-mono text-[10px] uppercase text-fg-subtle">{attack.lang}</span>
+            <span className="ml-1.5 text-fg-subtle">· {attack.technique}</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-sm text-fg-muted">Encoded payload:</span>
+        {ENCODED_ATTACKS.map((attack) => (
+          <button
+            key={attack.label}
+            type="button"
+            disabled={disabled}
+            onClick={() => onPick(attack.prompt)}
+            title={`An override (${attack.technique}) hidden as ${attack.label}; the gateway decodes and rescans it`}
+            className={CHIP}
+          >
+            <span className="font-mono">{attack.label}</span>
             <span className="ml-1.5 text-fg-subtle">· {attack.technique}</span>
           </button>
         ))}

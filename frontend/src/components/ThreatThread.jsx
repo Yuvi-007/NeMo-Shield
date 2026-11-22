@@ -4,6 +4,7 @@ import CopyButton from './CopyButton'
 import PresetChips from './PresetChips'
 import PromptBox from './PromptBox'
 import RailPathBadge from './RailPathBadge'
+import { FlagBadges, SignalChips } from './ThreatSignals'
 import VerdictChip from './VerdictChip'
 import { MAX_PROMPT_CHARS, MAX_THREAD_TURNS, SPLIT_TURN_ATTACK } from './presets'
 
@@ -96,7 +97,13 @@ function Exchange({ exchange, index }) {
             <span className="font-mono text-[11px] text-fg-subtle tabular-nums">
               {response.latency_ms.toFixed(response.latency_ms < 1 ? 2 : 1)} ms · {(response.confidence * 100).toFixed(0)}%
             </span>
+            <FlagBadges flags={response.flags} />
           </div>
+          {response.matched_signals?.length > 0 && (
+            <div className="mb-1.5">
+              <SignalChips signals={response.matched_signals} />
+            </div>
+          )}
           {response.verdict === 'INPUT_BLOCKED' && (
             <p className="mb-1 text-xs font-medium text-danger-fg">
               {response.rail_path === 'COLANG_INPUT' ? 'Colang flow aborted' : 'Halted before the Colang runtime'} at turn{' '}

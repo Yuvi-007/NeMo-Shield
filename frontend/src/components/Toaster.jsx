@@ -1,6 +1,6 @@
 import { CircleAlert, KeyRound, X } from 'lucide-react'
 import { useEffect, useSyncExternalStore } from 'react'
-import { subscribeAuthStatus } from '../services/api'
+import { ADMIN_LOCKOUT_FAILURES, ADMIN_LOCKOUT_MINUTES, subscribeAuthStatus } from '../services/api'
 import { dismissToast, getToasts, pushToast, subscribeToasts } from '../services/toast'
 
 export const ADMIN_KEY_INPUT_ID = 'admin-key-input'
@@ -29,10 +29,15 @@ const AUTH_TOASTS = {
     title: '503 Admin API disabled',
     body: 'ADMIN_API_KEY is not set on the backend, so admin routes fail closed. Set it and restart the server.',
   },
+  locked: {
+    tone: 'danger',
+    title: '429 Admin access locked',
+    body: `${ADMIN_LOCKOUT_FAILURES} failed key attempts from this IP. Every admin request is refused, even with the right key, for up to ${ADMIN_LOCKOUT_MINUTES} minutes.`,
+  },
   accepted: { tone: 'ok', title: 'Admin key accepted' },
 }
 
-const FAILURES = new Set(['missing', 'rejected', 'unconfigured'])
+const FAILURES = new Set(['missing', 'rejected', 'unconfigured', 'locked'])
 
 const TONES = {
   danger: 'border-danger/50 text-danger-fg',

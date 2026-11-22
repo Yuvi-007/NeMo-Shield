@@ -1,4 +1,4 @@
-import { KeyRound, ServerCrash, ShieldAlert } from 'lucide-react'
+import { KeyRound, LockKeyhole, ServerCrash, ShieldAlert } from 'lucide-react'
 import { describeError, errorKind } from '../services/api'
 import { ADMIN_KEY_INPUT_ID } from './Toaster'
 
@@ -11,6 +11,7 @@ function focusAdminKey() {
 const VARIANTS = {
   unauthorized: { Icon: KeyRound, title: '401 Unauthorized', tone: 'border-danger/40 bg-danger/10 text-danger-fg', keyAction: true },
   unconfigured: { Icon: ShieldAlert, title: '503 Admin API not configured', tone: 'border-warn/40 bg-warn/10 text-warn-fg' },
+  'locked-out': { Icon: LockKeyhole, title: '429 Admin access locked', tone: 'border-danger/40 bg-danger/10 text-danger-fg' },
   malformed: { Icon: ServerCrash, title: 'Unexpected response', tone: 'border-danger/40 bg-danger/10 text-danger-fg' },
   server: { Icon: ServerCrash, title: 'Gateway unavailable', tone: 'border-danger/40 bg-danger/10 text-danger-fg' },
 }

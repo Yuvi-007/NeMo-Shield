@@ -1,5 +1,6 @@
 import { REDACTION_TYPES, countRedactions, splitRedactions } from '../lib/redactions'
 import RailPathBadge from './RailPathBadge'
+import { FlagBadges, SignalChips } from './ThreatSignals'
 
 /** Distinct pill per redacted field type, e.g. "Email ×2". */
 export function RedactionPills({ counts, compact = false }) {
@@ -82,7 +83,22 @@ export default function PiiInspector({ record }) {
         {record.threat_category && <span>Threat: {record.threat_category}</span>}
         <span className="tabular-nums">Confidence {(record.confidence * 100).toFixed(0)}%</span>
         {record.session_id && <span className="font-mono">session {record.session_id}</span>}
+        {record.client_ip_hash && (
+          <span
+            className="font-mono"
+            title="Salted HMAC of the client IP. The raw IP is never stored; the same client keeps the same ID while AUDIT_IP_SALT is unchanged."
+          >
+            client {record.client_ip_hash}
+          </span>
+        )}
+        <FlagBadges flags={record.flags} />
       </div>
+      {record.matched_signals?.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+          <span>Signals:</span>
+          <SignalChips signals={record.matched_signals} />
+        </div>
+      )}
       <div className="grid gap-3 lg:grid-cols-2">
         <Side
           title="Prompt"

@@ -5,6 +5,7 @@ import { getAuditLogs, onAdminKeyChange } from '../services/api'
 import AdminErrorBanner from './AdminErrorBanner'
 import CopyButton from './CopyButton'
 import PiiInspector, { RedactionPills } from './PiiInspector'
+import { FlagBadges } from './ThreatSignals'
 import VerdictChip from './VerdictChip'
 
 const FILTERS = [
@@ -210,7 +211,10 @@ export default function AuditLedger() {
                     {snippet(r.reply)}
                   </td>
                   <td className="whitespace-nowrap px-3 py-2">
-                    <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} animate={false} />
+                    <span className="inline-flex items-center gap-1">
+                      <VerdictChip verdict={r.verdict} title={r.threat_category ?? r.verdict} animate={false} />
+                      <FlagBadges flags={r.flags} compact />
+                    </span>
                   </td>
                   <td className="px-3 py-2">
                     <RedactionPills counts={redactions} compact />

@@ -92,6 +92,8 @@ class ChatResponse(BaseModel):
     latency_ms: float = 0.0
     rail_path: RailPath = RailPath.PASSTHROUGH
     flags: List[RequestFlag] = Field(default_factory=list)
+    # Classifier signals behind the score, e.g. "base64:instruction_override".
+    matched_signals: List[str] = Field(default_factory=list)
     timestamp: str
 
 
@@ -129,6 +131,7 @@ class AuditLogEntry(BaseModel):
     session_id: Optional[str] = None
     # Empty on records written before flags existed.
     flags: List[RequestFlag] = Field(default_factory=list)
+    matched_signals: List[str] = Field(default_factory=list)
 
 
 class TelemetrySummary(BaseModel):

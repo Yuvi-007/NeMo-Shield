@@ -12,7 +12,8 @@ const FILES = [
   {
     id: 'output',
     name: 'output_rails.co',
-    summary: 'Runs after the model. Emails, card numbers, and API keys are masked before the reply is sent.',
+    summary:
+      'Runs after the model. 17 detectors, one per masker rule, catch API keys, tokens, passwords, connection strings, cards, phones, SSNs, and emails before the reply is sent.',
     source: outputRailsSource,
   },
 ]
@@ -68,7 +69,7 @@ function CodeView({ source }) {
 const PIPELINE = [
   {
     title: 'Input rail evaluates the prompt',
-    body: 'Colang flows run three regex detectors (instruction override, jailbreak personas, system prompt extraction), then ClassifyThreatAction scores multi-signal attacks.',
+    body: 'Colang flows run three regex detectors (instruction override, jailbreak personas, system prompt extraction), then ClassifyThreatAction scores multi-signal attacks. Base64 and hex payloads that decode to text are rescanned with the same signals.',
     tone: 'border-accent/40',
   },
   {
@@ -83,7 +84,7 @@ const PIPELINE = [
   },
   {
     title: 'Output rail redacts before delivery',
-    body: 'mask_pii_output checks the reply for card numbers, emails, and sk- keys, and rewrites $bot_message through MaskSensitiveEntitiesAction.',
+    body: 'mask_pii_output runs one detector per masker rule (the same regexes, kept in sync by a test) and rewrites $bot_message through MaskSensitiveEntitiesAction. The gateway then re-masks the reply as a safety net.',
     tone: 'border-warn/50',
   },
 ]

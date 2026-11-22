@@ -385,6 +385,7 @@ async def guard_chat(
         latency_ms=round(latency_ms, 2),
         rail_path=_rail_path(verdict, fast_path),
         flags=_request_flags(turns, threat),
+        matched_signals=list(threat.get("matched_signals", [])),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
     entry = AuditLogEntry(
@@ -401,6 +402,7 @@ async def guard_chat(
         client_ip_hash=hash_client_ip(get_client_ip(http_request)),
         session_id=request.session_id,
         flags=response.flags,
+        matched_signals=response.matched_signals,
     )
     background_tasks.add_task(_record_audit_log, entry)
     return response

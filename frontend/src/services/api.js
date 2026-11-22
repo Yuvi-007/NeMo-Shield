@@ -131,6 +131,15 @@ function isAdminDisabled(error) {
   return error?.response?.status === 503 && typeof detail === 'string' && detail.startsWith('Admin API disabled')
 }
 
+// Backend: 5 failed admin auths per IP in 15 min lock that IP out, even with the right key.
+export const ADMIN_LOCKOUT_FAILURES = 5
+export const ADMIN_LOCKOUT_MINUTES = 15
+
+function isAdminLockout(error) {
+  const detail = error?.response?.data?.detail
+  return error?.response?.status === 429 && typeof detail === 'string' && detail.startsWith('Too many failed admin')
+}
+
 async function adminGet(path, params) {
   try {
     const { data } = await client.get(path, { params, headers: adminHeaders() })
@@ -139,6 +148,7 @@ async function adminGet(path, params) {
   } catch (error) {
     if (error?.response?.status === 401) setAuthStatus(getAdminKey() ? 'rejected' : 'missing')
     else if (isAdminDisabled(error)) setAuthStatus('unconfigured')
+    else if (isAdminLockout(error)) setAuthStatus('locked')
     throw error
   }
 }
@@ -147,6 +157,9 @@ async function adminGet(path, params) {
 // Endpoints
 // ---------------------------------------------------------------------------
 
+// Older gateways and audit records predate `flags` / `matched_signals`.
+const strings = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string') : [])
+
 function normalizeChat(data) {
   requireShape(data, '/guard/chat', { reply: 'string', verdict: 'string' })
   return {
@@ -154,6 +167,8 @@ function normalizeChat(data) {
     confidence: num(data.confidence),
     latency_ms: num(data.latency_ms),
     rail_path: typeof data.rail_path === 'string' ? data.rail_path : null,
+    flags: strings(data.flags),
+    matched_signals: strings(data.matched_signals),
   }
 }
 
@@ -191,6 +206,9 @@ export async function getAuditLogs(limit = 50, skip = 0, verdict = null) {
     reply: typeof r.reply === 'string' ? r.reply : '',
     latency_ms: num(r.latency_ms),
     confidence: num(r.confidence),
+    flags: strings(r.flags),
+    matched_signals: strings(r.matched_signals),
+    client_ip_hash: typeof r.client_ip_hash === 'string' ? r.client_ip_hash : null,
   }))
 }
 
@@ -222,6 +240,7 @@ export function errorKind(error) {
   if (status === 401) return 'unauthorized'
   if (isAdminDisabled(error)) return 'unconfigured'
   if (status === 422) return 'validation'
+  if (isAdminLockout(error)) return 'locked-out'
   if (status === 429) return 'rate-limited'
   if (status >= 500) return 'server'
   if (error?.code === 'ECONNABORTED') return 'timeout'
@@ -242,6 +261,8 @@ export function describeError(error) {
       return 'Admin API is disabled (503): set ADMIN_API_KEY on the backend and restart it.'
     case 'validation':
       return describeValidation(error.response.data?.detail)
+    case 'locked-out':
+      return `Admin access locked (429) after ${ADMIN_LOCKOUT_FAILURES} failed key attempts from this IP. Even the correct key is refused until ${ADMIN_LOCKOUT_MINUTES} minutes after the first failure.`
     case 'rate-limited':
       return 'Rate limit exceeded (60 requests/min). Wait a minute and try again.'
     case 'server':

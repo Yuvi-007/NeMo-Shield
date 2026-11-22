@@ -8,7 +8,8 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: actions/setup-python has no 3.12.10 build for Ubuntu 26.04 (ubuntu-latest).
+    runs-on: ubuntu-24.04
     env:
       NEMO_SHIELD_FORCE_MEMORY_DB: "1"
       NEMO_SHIELD_FORCE_MOCK: "1"

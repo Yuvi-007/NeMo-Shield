@@ -2,9 +2,16 @@ import core
 import guardrails
 
 # Output rails: PII / secret redaction before a response reaches the user.
-# Colang strings interpolate {..}, so regex quantifiers are written {{n}}.
-# Word boundaries use (?<!\w) / (?!\w) because "\b" would be read as a
-# backspace escape inside a string literal.
+#
+# One detector per rule in _MASKING_RULES (config/actions.py), with the identical
+# regex; tests/test_api.py fails if the two lists drift apart. Colang decides
+# whether to redact, and MaskSensitiveEntitiesAction does the substitution.
+#
+# Colang string quirks:
+#   - {..} is interpolation, so regex quantifiers are written {{n}};
+#   - a backslash-b would be a backspace, so word boundaries are (?<!\w) / (?!\w);
+#   - quotes are written \x22 / \x27, and backreferences are named, e.g. (?P=q).
+# Every regex here is linear on 100k-char input (see the ReDoS tests).
 
 flow output rails $output_text
   mask_pii_output $output_text
@@ -12,11 +19,24 @@ flow output rails $output_text
 flow mask_pii_output $output_text
   global $bot_message
 
-  $has_cc = search("(?<!\d)\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}(?!\d)", $output_text)
-  # Look-behind keeps this linear (see _MASKING_RULES in config/actions.py).
+  $has_bearer = search("(?i)(?<![A-Za-z0-9])(bearer[ \t]{{1,10}})(?=[A-Za-z]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{{8,}}", $output_text)
+  $has_jwt = search("(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{{5,}}\.[A-Za-z0-9_-]{{5,}}\.[A-Za-z0-9_-]+", $output_text)
+  $has_aws_key = search("(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{{16}}(?![0-9A-Z])", $output_text)
+  $has_github_key = search("(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{{36,255}}", $output_text)
+  $has_github_pat = search("(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{{22,255}}", $output_text)
+  $has_google_key = search("(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{{35}}(?![0-9A-Za-z_-])", $output_text)
+  $has_nvidia_key = search("(?<![A-Za-z0-9])nvapi-[A-Za-z0-9_-]{{20,}}", $output_text)
+  $has_sk_key = search("(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{{20,}}", $output_text)
+  $has_uri_credentials = search("(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{{1,20}}://)[^\s:/@]{{1,256}}:[^\s/@]{{1,256}}@", $output_text)
+  $has_quoted_password = search("(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{{0,5}}[:=][ \t]{{0,5}})(?P<q>[\x22\x27])(?!\[REDACTED_)[^\x22\x27\r\n]{{1,256}}(?P=q)", $output_text)
+  $has_password = search("(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{{0,5}}[:=][ \t]{{0,5}})(?![\x22\x27\[])[^\s\x22\x27,;]{{1,256}}", $output_text)
+  $has_card19 = search("(?<!\d)\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{3}}(?!\d)", $output_text)
+  $has_card16 = search("(?<!\d)\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}[- ]?\d{{4}}(?!\d)", $output_text)
+  $has_amex = search("(?<!\d)3[47]\d{{2}}[- ]?\d{{6}}[- ]?\d{{5}}(?!\d)", $output_text)
+  $has_phone = search("(?<![\w+])\+[1-9](?:[ -]?\d){{7,14}}(?!\d)", $output_text)
+  $has_ssn = search("(?<![\d-])\d{{3}}-\d{{2}}-\d{{4}}(?![\d-])", $output_text)
   $has_email = search("(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}", $output_text)
-  $has_key = search("(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{{20,}}", $output_text)
 
-  if $has_cc or $has_email or $has_key
+  if $has_bearer or $has_jwt or $has_aws_key or $has_github_key or $has_github_pat or $has_google_key or $has_nvidia_key or $has_sk_key or $has_uri_credentials or $has_quoted_password or $has_password or $has_card19 or $has_card16 or $has_amex or $has_phone or $has_ssn or $has_email
     # `_bot_say` delivers $bot_message, so overwriting it redacts the reply.
     $bot_message = await MaskSensitiveEntitiesAction(text=$output_text)

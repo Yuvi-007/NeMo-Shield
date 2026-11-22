@@ -25,9 +25,9 @@ from nemoguardrails.types import ChatMessage, Role
 # (`AKIA`, `eyJ`, `+`, "password"...) or at the start of a run, enforced by a
 # look-behind, and every repeat is bounded or over a class the next token
 # cannot also match. tests/test_api.py runs each rule on 100k-char inputs.
-# The Colang output rail (config/rails/output_rails.co) only detects the
-# original card/email/sk- shapes; the gateway applies this full list to every
-# reply after the rails run, so the newer types are masked either way.
+# config/rails/output_rails.co has one search() detector per rule with the
+# identical regex (tests/test_api.py enforces it), so the Colang rail and the
+# gateway re-mask agree on what counts as sensitive.
 # (`\b` is wrong here: it misses glued forms like "card4111..." and "_sk-...".)
 _MASKING_RULES = [
     # Bearer tokens keep the scheme word: "Bearer [REDACTED_TOKEN]".
@@ -54,15 +54,21 @@ _MASKING_RULES = [
         r"\1[REDACTED_CREDENTIALS]@",
     ),
     # Password literals keep the field name: `"password": "[REDACTED_PASSWORD]"`.
+    # Quotes are spelled \x22 / \x27 and the closing quote is the named group
+    # (?P=q) because these regexes are copied verbatim into output_rails.co: a
+    # raw quote would end the Colang string, and "\2" would be read as an octal
+    # escape. (?!\[REDACTED_) stops an already-masked value from matching again.
     (
         re.compile(
-            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(["'])[^"'\r\n]{1,256}\2"""
+            r"(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{0,5}[:=][ \t]{0,5})"
+            r"(?P<q>[\x22\x27])(?!\[REDACTED_)[^\x22\x27\r\n]{1,256}(?P=q)"
         ),
-        r"\1\2[REDACTED_PASSWORD]\2",
+        r"\1\g<q>[REDACTED_PASSWORD]\g<q>",
     ),
     (
         re.compile(
-            r"""(?i)((?<![A-Za-z0-9])["']?(?:password|passwd|pwd)["']?[ \t]{0,5}[:=][ \t]{0,5})(?!["'\[])[^\s"',;]{1,256}"""
+            r"(?i)((?<![A-Za-z0-9])[\x22\x27]?(?:password|passwd|pwd)[\x22\x27]?[ \t]{0,5}[:=][ \t]{0,5})"
+            r"(?![\x22\x27\[])[^\s\x22\x27,;]{1,256}"
         ),
         r"\1[REDACTED_PASSWORD]",
     ),

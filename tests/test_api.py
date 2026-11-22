@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 
@@ -525,7 +526,9 @@ def _colang_detectors():
     """Extract the search() regexes from output_rails.co, undoing Colang's {{ }} escaping."""
     source = OUTPUT_RAILS.read_text(encoding="utf-8")
     raw = re.findall(r'search\("((?:[^"\\]|\\.)*)"', source)
-    assert len(raw) == 3, "expected card, email and key detectors in output_rails.co"
+    from backend.routes import _actions
+
+    assert len(raw) == len(_actions._MASKING_RULES), "output_rails.co needs one detector per masker rule"
     return [re.compile(rx.replace("{{", "{").replace("}}", "}")) for rx in raw]
 
 
@@ -1337,3 +1340,102 @@ def test_production_app_still_serves_the_api(monkeypatch):
     response = TestClient(create_app()).get("/api/v1/health")
     assert response.status_code == 200
     assert response.headers.get("x-frame-options") == "DENY"
+
+
+# ---------------------------------------------------------------------------
+# Roadmap #1: the Colang output rail mirrors the full masker, and the audit
+# log masks PII hidden by obfuscation (zero-width, fullwidth, letter-spacing).
+# ---------------------------------------------------------------------------
+
+
+def _colang_detector_sources():
+    source = OUTPUT_RAILS.read_text(encoding="utf-8")
+    raw = re.findall(r'search\("((?:[^"\\]|\\.)*)"', source)
+    return [rx.replace("{{", "{").replace("}}", "}") for rx in raw]
+
+
+def test_colang_output_rail_mirrors_every_masker_rule():
+    """Single source of truth: each masker regex appears verbatim as a Colang detector."""
+    from backend.routes import _actions
+
+    masker = sorted(pattern.pattern for pattern, _ in _actions._MASKING_RULES)
+    assert sorted(_colang_detector_sources()) == masker
+
+
+@pytest.mark.parametrize("text", [case.values[0] for case in MASKING_CASES], ids=[c.id for c in MASKING_CASES])
+def test_colang_rail_detects_every_widened_entity(text):
+    assert any(detector.search(text) for detector in _colang_detectors()), f"no Colang detector fires on {text!r}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [case.values[0] for case in MASKING_CASES] + [_secret_prompt("corpus")],
+)
+def test_masker_output_never_retriggers_a_colang_detector(text):
+    from backend.routes import mask_sensitive_entities
+
+    masked = asyncio.run(mask_sensitive_entities(text))
+    for detector in _colang_detectors():
+        assert not detector.search(masked), f"{detector.pattern!r} still matches {masked!r}"
+
+
+@pytest.mark.parametrize("text", [case.values[0] for case in MASKING_CASES], ids=[c.id for c in MASKING_CASES])
+def test_masker_is_idempotent(text):
+    from backend.routes import mask_sensitive_entities
+
+    once = asyncio.run(mask_sensitive_entities(text))
+    assert asyncio.run(mask_sensitive_entities(once)) == once
+
+
+def test_quoted_password_holding_a_key_keeps_one_token():
+    from backend.routes import mask_sensitive_entities
+
+    masked = asyncio.run(mask_sensitive_entities(f'{{"password": "{AWS_KEY}"}}'))
+    assert masked == '{"password": "[REDACTED_KEY]"}'
+
+
+def test_colang_output_rail_alone_redacts_widened_secrets(client, monkeypatch):
+    """With the gateway re-mask disabled, the Colang rail must still catch every type."""
+    from backend import routes
+    from mock_llm import MockLLM
+
+    async def no_remask(text=None, context=None):
+        return text
+
+    monkeypatch.setattr(MockLLM, "_reply", lambda self, prompt: _secret_prompt("colang-only"))
+    monkeypatch.setattr(routes, "mask_sensitive_entities", no_remask)
+    body = client.post(CHAT_URL, json={"prompt": "Summarize the CAP theorem"}).json()
+    assert body["verdict"] == "OUTPUT_ALTERED"
+    for name, value in ALL_SECRETS.items():
+        assert value not in body["reply"], f"{name} slipped past the Colang output rail"
+
+
+OBFUSCATED_PII = [
+    pytest.param("john​@example.com", "john@example.com", "[REDACTED_EMAIL]", id="zero-width before @"),
+    pytest.param(
+        "ｊａｎｅ＠ｃｏｒｐ．ｉｏ",
+        "jane@corp.io",
+        "[REDACTED_EMAIL]",
+        id="fullwidth email",
+    ),
+    pytest.param(" 4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1", "4111111111111111", "[REDACTED_CC]", id="letter-spaced card"),
+]
+
+
+@pytest.mark.parametrize(("hidden", "plain", "token"), OBFUSCATED_PII)
+def test_audit_log_masks_pii_hidden_by_obfuscation(client, hidden, plain, token):
+    tag = f"obf-audit-{uuid.uuid4().hex[:8]}"
+    assert client.post(CHAT_URL, json={"prompt": f"{tag} contact {hidden}"}).status_code == 200
+
+    records = client.get("/api/v1/audit/logs", params={"limit": 500}, headers=ADMIN_HEADERS).json()
+    stored = [r["prompt"] for r in records if tag in r["prompt"]]
+    assert len(stored) == 1
+    assert hidden not in stored[0] and plain not in stored[0]
+    assert token in stored[0]
+
+
+def test_audit_log_keeps_clean_non_latin_prompt_verbatim(client):
+    prompt = "audit-hindi क्या आप मेरी मदद कर सकते हैं?"
+    assert client.post(CHAT_URL, json={"prompt": prompt}).status_code == 200
+    records = client.get("/api/v1/audit/logs", params={"limit": 500}, headers=ADMIN_HEADERS).json()
+    assert prompt in [r["prompt"] for r in records]

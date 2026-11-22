@@ -282,6 +282,22 @@ async def health() -> Dict[str, Any]:
     return {"status": "healthy", "service": "NeMo-Shield", "rails_active": True}
 
 
+async def mask_for_audit(text: str) -> str:
+    """Mask PII in a prompt before it is persisted.
+
+    Obfuscation (zero-width characters, fullwidth letters, letter-spacing) can
+    hide PII from the masker. If the canonical form of the masked prompt still
+    contains PII, the masked canonical form is stored instead. Clean prompts,
+    including non-Latin ones, are stored as written, because canonicalization
+    would garble them.
+    """
+    masked = await mask_sensitive_entities(text)
+    canonical = canonicalize_text(masked)
+    if await mask_sensitive_entities(canonical) == canonical:
+        return masked
+    return await mask_sensitive_entities(canonicalize_text(text))
+
+
 async def _record_audit_log(entry: AuditLogEntry) -> None:
     await audit_store.insert_audit_log(entry.model_dump(mode="json"))
 
@@ -314,7 +330,7 @@ async def guard_chat(
         id=uuid4().hex,
         timestamp=response.timestamp,
         # Never persist raw user PII to the audit store.
-        prompt=await mask_sensitive_entities(turns[-1].content),
+        prompt=await mask_for_audit(turns[-1].content),
         reply=response.reply,
         verdict=response.verdict,
         threat_category=response.threat_category,

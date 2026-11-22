@@ -62,6 +62,31 @@ def canonicalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+# Share of non-Latin letters above which a prompt is flagged: the injection
+# signatures are English-only, so such prompts get no real signature coverage.
+UNCOVERED_SCRIPT_SHARE = 0.3
+_MIN_LETTERS_FOR_LANGUAGE_CHECK = 4
+
+
+def uncovered_language(text: str) -> bool:
+    """True if enough of the letters are outside the Latin script.
+
+    Run this on the user's original text, not the canonical form: canonical
+    folding turns Cyrillic and Greek look-alikes into Latin letters. Accented
+    and fullwidth Latin letters count as Latin.
+    """
+    latin = other = 0
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        if "LATIN" in unicodedata.name(ch, ""):
+            latin += 1
+        else:
+            other += 1
+    total = latin + other
+    return total >= _MIN_LETTERS_FOR_LANGUAGE_CHECK and other / total >= UNCOVERED_SCRIPT_SHARE
+
+
 # Shipped as a default in earlier versions, so treat it as public and never accept it.
 LEGACY_DEFAULT_ADMIN_KEY = "dev-admin-secret-key"
 ADMIN_DISABLED_DETAIL = "Admin API disabled: ADMIN_API_KEY is not configured"

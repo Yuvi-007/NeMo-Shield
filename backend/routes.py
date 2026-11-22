@@ -18,7 +18,7 @@ from nemoguardrails import LLMRails, RailsConfig
 from nemoguardrails.types import ChatMessage, Role
 
 from backend.database import audit_store
-from backend.security import canonicalize_text, verify_admin_key
+from backend.security import canonicalize_text, uncovered_language, verify_admin_key
 from backend.models import (
     ABTestRequest,
     ABTestResponse,
@@ -27,6 +27,7 @@ from backend.models import (
     ChatResponse,
     ChatTurn,
     RailPath,
+    RequestFlag,
     SafetyVerdict,
     TelemetrySummary,
 )
@@ -246,13 +247,29 @@ async def _scan_conversation(turns: Sequence[ChatTurn]) -> Dict[str, Any]:
     texts = [" ".join(turn.content for turn in turns if turn.role == "user")]
     texts += [turn.content for turn in turns[:-1] if turn.role == "assistant"]
     worst = latest
+    decoded = latest.get("decoded_payloads", 0)
     for text in texts:
         result = await classify_threat(canonicalize_text(text))
+        decoded += result.get("decoded_payloads", 0)
         if result["confidence"] > worst["confidence"]:
             worst = result
         if worst["rail_action"] == "BLOCKED":
             break
-    return worst
+    return {**worst, "decoded_payloads": decoded}
+
+
+def _request_flags(turns: Sequence[ChatTurn], threat: Dict[str, Any]) -> List[RequestFlag]:
+    """Advisory flags; they never change the verdict.
+
+    The language check reads the original text of every turn, since all of
+    it reaches the model, and canonical folding would hide Cyrillic/Greek.
+    """
+    flags: List[RequestFlag] = []
+    if threat.get("decoded_payloads"):
+        flags.append(RequestFlag.ENCODED_PAYLOAD)
+    if uncovered_language(" ".join(turn.content for turn in turns)):
+        flags.append(RequestFlag.UNCOVERED_LANGUAGE)
+    return flags
 
 
 async def _guard(turns: Sequence[ChatTurn]) -> Tuple[str, float, Dict[str, Any], bool]:
@@ -367,6 +384,7 @@ async def guard_chat(
         confidence=round(confidence, 4),
         latency_ms=round(latency_ms, 2),
         rail_path=_rail_path(verdict, fast_path),
+        flags=_request_flags(turns, threat),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
     entry = AuditLogEntry(
@@ -382,6 +400,7 @@ async def guard_chat(
         rail_path=response.rail_path,
         client_ip=get_client_ip(http_request),
         session_id=request.session_id,
+        flags=response.flags,
     )
     background_tasks.add_task(_record_audit_log, entry)
     return response
